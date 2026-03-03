@@ -1,0 +1,108 @@
+# LaRE 训练配置文件
+# 使用: python train_full_pipeline.py --config train_config.yaml
+
+# 数据配置
+data:
+  root: "data"
+  train_file: "annotation/train_doubao_sampled.txt"
+  val_file: "annotation/val_doubao_sampled.txt"
+  test_file: "annotation/test_doubao_sampled.txt"
+  map_file: "annotation/map_sdxl_train.txt"
+  
+  # Doubao 权重增强配置
+  doubao_weight: 10.0           # Doubao 数据重复次数（10倍增强）
+  doubao_sample_ratio: 1.0      # Doubao 采样比例（100%全用）
+  regular_sample_ratio: 0.03    # 其他数据采样比例（3%）
+  doubao_val_ratio: 0.5         # 验证集中 Doubao 占比（50%平衡）
+
+# 模型配置
+model:
+  name: "LaREDeepFakeV11"
+  clip_type: "RN50x64"
+  texture_model: "convnext_tiny"
+  num_classes: 2
+  enable_trufor: true           # 启用 TruFor 特征
+  trufor_loss_weight: 10.0     # TruFor 损失权重
+
+# 训练参数
+training:
+  batch_size: 16
+  test_batch_size: 32
+  data_size: 448                # CLIP 输入尺寸
+  highres_size: 512             # 纹理分支输入尺寸
+  learning_rate: 0.0001
+  clip_learning_rate: 0.000002 # CLIP backbone 学习率
+  epochs: 25
+  freeze_clip_epochs: 6         # 冻结 CLIP 的轮数
+  early_stop_patience: 5        # 早停耐心值
+  workers: 8                     # 数据加载工作线程数
+  val_freq: 1                    # 验证频率（每轮验证）
+  use_amp: true                 # 使用自动混合精度
+
+# 优化器配置
+optimizer:
+  type: "AdamW"
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+
+# 学习率调度器
+scheduler:
+  type: "CosineAnnealingLR"
+  T_max: 25                     # 总轮数
+  eta_min: 1e-6                  # 最小学习率
+
+# 损失函数配置
+loss:
+  classification_weight: 1.0    # 分类损失权重
+  segmentation_weight: 50.0      # 分割损失权重（mask学习）
+  trufor_weight: 10.0           # TruFor 损失权重
+
+# 特征提取配置
+feature_extraction:
+  img_size: 256                 # LaRE 特征提取尺寸
+  T: 280                        # LaRE 时间步数
+  ensemble_size: 1              # LaRE 集成大小
+  n_gpus: 1                     # GPU数量
+  pretrained_model: "stabilityai/stable-diffusion-xl-base-1.0"  # SDXL 模型
+  dtype: "fp16"                  # 数据类型
+  extract_batch_size: 8         # 特征提取批次大小
+  extract_workers: 8             # 特征提取工作线程数
+
+# TruFor 配置
+trufor:
+  model_path: "项目参考/TruFor-main/TruFor_train_test/pretrained_models/trufor.pth.tar"
+  map_dir: "trufor_maps/data"
+  input_resize: [1024, 1024]    # TruFor 输入尺寸
+
+# 输出配置
+output:
+  dir: "outputs/v13_doubao_focused"
+  exp_name: "v13_doubao_focused"
+  model_version: "V11Fusion"
+  save_freq: 1                   # 保存频率（每轮保存）
+  save_best_only: true          # 只保存最佳模型
+
+# 日志配置
+logging:
+  tensorboard: true             # 启用 TensorBoard
+  log_dir: "outputs/v13_doubao_focused/logs"
+  checkpoint_dir: "outputs/v13_doubao_focused/checkpoints"
+
+# 硬件配置
+hardware:
+  numexpr_max_threads: 28       # NumExpr 最大线程数
+  cudnn_benchmark: true         # 启用 cuDNN 基准测试
+  cudnn_deterministic: false    # 禁用 cuDNN 确定性（提高速度）
+
+# 验证配置
+validation:
+  metrics: ["accuracy", "precision", "recall", "f1", "auc"]
+  save_confusion_matrix: true
+  save_classification_report: true
+
+# 测试配置
+testing:
+  batch_size: 32
+  metrics: ["accuracy", "precision", "recall", "f1", "auc", "confusion_matrix"]
+  per_category_evaluation: true  # 按类别评估
+  save_predictions: true        # 保存预测结果

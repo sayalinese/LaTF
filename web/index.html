@@ -1,0 +1,133 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LaTF - AI图片真实性检测</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="background-animation"></div>
+    
+    <div class="container">
+        <header>
+            <div class="logo">
+                <i class="fa-solid fa-shield-halved"></i>
+                <span>LaTF 检测系统</span>
+            </div>
+
+        </header>
+
+        <main class="card">
+            <div class="upload-section" id="upload-area">
+                <input type="file" id="file-input" accept="image/*" hidden>
+                <div class="upload-content">
+                    <div class="icon-circle">
+                        <i class="fa-solid fa-cloud-arrow-up"></i>
+                    </div>
+                    <h3>上传图片</h3>
+                    <p>拖拽或点击浏览</p>
+                    <span class="file-support">支持 JPG, PNG, WEBP</span>
+                </div>
+            </div>
+
+            <div class="preview-section hidden" id="preview-container">
+                <div class="image-wrapper">
+                    <img id="image-preview" src="" alt="预览">
+                    <button class="remove-btn" id="remove-btn"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                
+                <div class="action-buttons">
+                    <button id="predict-btn" class="primary-btn">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> 开始分析
+                    </button>
+                </div>
+            </div>
+
+            <div class="result-section hidden" id="result-container">
+                <div class="loader hidden" id="loader">
+                    <div class="spinner"></div>
+                    <p>正在分析潜在噪声模式...</p>
+                </div>
+
+                <div class="result-content hidden" id="result-content">
+                    <div class="status-badge" id="status-badge">
+                        <i id="status-icon" class="fa-solid"></i>
+                        <span id="result-text">--</span>
+                    </div>
+
+                    <!-- Heatmap Container (Interactive Slider) -->
+                    <div id="heatmap-container" class="heatmap-wrapper hidden">
+                        <h4><i class="fa-solid fa-layer-group"></i> 分析对比</h4>
+                        <p class="heatmap-desc">拖动滑块查看 AI 异常热力图。</p>
+                        
+                        <div class="comparison-container" id="comparison-slider">
+                            <!-- Bottom Image (Heatmap) -->
+                            <img id="heatmap-bg" class="comparison-image" src="" alt="Heatmap">
+                            <span class="label-badge label-heatmap">AI 热力图</span>
+                            
+                            <!-- Top Image (Original) -->
+                            <div class="img-overlay" id="img-overlay">
+                                <img id="original-fg" src="" alt="Original">
+                                <span class="label-badge label-original">原图</span>
+                            </div>
+                            
+                            <!-- Handle -->
+                            <div class="slider-handle" id="slider-handle"></div>
+                        </div>
+                    </div>
+
+                    <div class="confidence-meter">
+                        <div class="meter-labels">
+                            <span>真实照片</span>
+                            <span id="probability-text">50%</span>
+                            <span>AI 生成</span>
+                        </div>
+                        <div class="meter-bar-bg">
+                            <div class="meter-bar-fill" id="meter-fill"></div>
+                        </div>
+                        <div class="meter-stats">
+                            <div class="stat-box real">
+                                <span class="label">真实概率</span>
+                                <span class="value" id="prob-real">0.0%</span>
+                            </div>
+                            <div class="stat-box fake">
+                                <span class="label">AI 概率</span>
+                                <span class="value" id="prob-fake">0.0%</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Debug panel -->
+                    <div class="debug-panel" id="debug-panel">
+                        <div class="debug-header">
+                            <span class="debug-title"><i class="fa-solid fa-bug"></i> 调试信息</span>
+                            <button class="debug-toggle" id="debug-toggle" type="button">隐藏</button>
+                        </div>
+                        <pre class="debug-pre" id="debug-pre">(no data)</pre>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+        </footer>
+    </div>
+
+    <!-- Model info badge (debug/introspection) -->
+    <div class="model-info-badge" id="model-info-badge" title="Loading model info...">
+        <i class="fa-solid fa-microchip" aria-hidden="true"></i>
+        <span class="model-info-text" id="model-info-text">模型：加载中…</span>
+        <button class="model-info-btn" id="model-info-refresh" type="button" title="刷新 /config">
+            <i class="fa-solid fa-rotate" aria-hidden="true"></i>
+        </button>
+        <button class="model-info-btn" id="model-info-copy" type="button" title="复制 ckpt_path">
+            <i class="fa-solid fa-copy" aria-hidden="true"></i>
+        </button>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
