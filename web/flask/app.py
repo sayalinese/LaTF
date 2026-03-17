@@ -1,19 +1,17 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
-import torch
-import torch.nn.functional as F
-from PIL import Image
-from io import BytesIO
 import os
 import sys
+import torch
 import numpy as np
 import cv2
+from PIL import Image, ImageOps
+from io import BytesIO
+import base64
 from pathlib import Path
 from dotenv import load_dotenv
-import base64
 
 # Load environment variables
-# Priority: web/.env overrides project root .env (so web settings don't get ignored).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / '.env')
 load_dotenv(PROJECT_ROOT / 'web' / '.env', override=True)
@@ -21,204 +19,62 @@ load_dotenv(PROJECT_ROOT / 'web' / '.env', override=True)
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
-# Import model and utils
+app = Flask(__name__)
+app.config['JSON_AS_ASCII'] = False  # Support Chinese characters
+
+# Database configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/laft')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Import models and initialize db and migrate
+from models import db, migrate
+db.init_app(app)
+migrate.init_app(app, db)
+
+CORS(app)  # Allow Cross-Origin requests
+
+# 导入重构后的模块 (位于 web/flask/flask_service 下)
 try:
-    from service.model import CLipClassifierWMapV9Lite, CLipClassifierWMapV7, CLipClassifierV10Fusion
-    from service.model_v11_fusion import LaREDeepFakeV11  # [V11] New Import
-    from service.lare_extractor_module import LareExtractor
-    from service.trufor_wrapper import TruForExtractor # [V13] New Import
-    from service.cascade_inference import CascadeInference
-    from service.statistical_detector import StatisticalLocalDetector, DualModelDetector
+    from flask_service.laft.manager import LaFTManager
+    from flask_service.vllm.qwen_vl import (
+        OllamaConnectionError,
+        OllamaTimeoutError,
+        explain_logic_with_qwen,
+        explain_logic_with_qwen_stream,
+    )
 except ImportError as e:
     print(f"Import Error: {e}")
     print("Ensure you are running this from the correct environment and paths are set.")
     sys.exit(1)
 
-app = Flask(__name__)
-app.config['JSON_AS_ASCII'] = False  # Support Chinese characters
-CORS(app)  # Allow Cross-Origin requests
+# 初始化统一的预测管理器
+LAFT_MANAGER = LaFTManager(project_root=str(PROJECT_ROOT))
 
-# LaTF (LaRE + TruFor Fusion) - Hybrid Image Authenticity Detection System
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MODEL = None
-LARE_EXTRACTOR = None
-TRUFOR_EXTRACTOR = None # [V13]
-CASCADE_INFERENCE = None
-DUAL_DETECTOR = None  # 双模型检测器
-STAT_DETECTOR = None  # 统计检测器
-CLASS_NAMES = ["Real Photo", "AI Generated"]
-
-# Debug / introspection
-LOADED_CKPT_PATH = None
-RESOLVED_OUT_DIR = None
-
-# Configuration
-USE_CASCADE = os.getenv("USE_CASCADE_INFERENCE", "true").lower() == "true"
-CASCADE_THRESHOLD = float(os.getenv("CASCADE_THRESHOLD", "0.3"))  # Lowered for better local inpaint detection
-MODEL_VERSION = os.getenv("MODEL_VERSION", "V13")  # Default to V13
-AI_CONFIDENCE_THRESHOLD = 0.5  # Raised from default 0.5 to reduce false positives
-
-
-def load_model():
-    global MODEL, LARE_EXTRACTOR, TRUFOR_EXTRACTOR, CASCADE_INFERENCE, LOADED_CKPT_PATH, RESOLVED_OUT_DIR
-    print(f"Loading models on {DEVICE}...")
-
-    # 1. Initialize LaRE Extractor (可选，加载失败不影响基础功能)
-    MODEL_TYPE = os.getenv("LARE_MODEL_TYPE", "sdxl")  
-    print(f"[Config] Using LaRE backbone: {MODEL_TYPE.upper()}")
-    
-    if LARE_EXTRACTOR is None:
-        try:
-            # 保持float32一致性，避免精度问题
-            dtype = torch.float32
-            LARE_EXTRACTOR = LareExtractor(device=DEVICE, model_type=MODEL_TYPE, dtype=dtype)
-        except Exception as ex:
-            print(f"[LaRE] Failed to load: {ex}")
-            print("[LaRE] WARNING: LaRE not available, dual detection will be disabled")
-            LARE_EXTRACTOR = None
-
-    # [V13] Initialize TruFor Extractor
-    if TRUFOR_EXTRACTOR is None and MODEL_VERSION in ["V13", "V11"]:
-        try:
-            print("[Config] Initializing TruFor Extractor...")
-            TRUFOR_EXTRACTOR = TruForExtractor(device=DEVICE)
-        except Exception as ex:
-            print(f"[TruFor] Failed to load: {ex}")
-            TRUFOR_EXTRACTOR = None
-
-    # 2. Initialize Classifier based on MODEL_VERSION
-    clip_type = "RN50x64"
-    print(f"[Config] Loading model version: {MODEL_VERSION}")
-    
-    ckpt_path = None
-    
-    if MODEL_VERSION == "V13" or MODEL_VERSION == "V11Fusion":
-        # [V13] V11 Fusion Architecture + TruFor
-        texture_model = os.getenv("TEXTURE_MODEL", "convnext_tiny")
-        # Reuse V11 class as V13 is likely same architecture
-        model = LaREDeepFakeV11(clip_type=clip_type, num_classes=2, texture_model=texture_model)
-        out_dir = os.getenv('OUT_DIR', 'outputs/v13_doubao_focused')
-        print(f"[Config] Initializing V13 Fusion (TruFor Enhanced) with Texture Branch: {texture_model}")
-    elif MODEL_VERSION == "V11":
-        # [V11] Support
-        texture_model = os.getenv("TEXTURE_MODEL", "convnext_tiny")
-        model = LaREDeepFakeV11(clip_type=clip_type, num_classes=2, texture_model=texture_model)
-        out_dir = os.getenv('OUT_DIR', 'outputs/v11_fusion')
-        print(f"[Config] Initializing V11 Fusion with Texture Branch: {texture_model}")
-    elif MODEL_VERSION == "V10Fusion":
-        model = CLipClassifierV10Fusion(clip_type=clip_type, num_class=2)
-        out_dir = os.getenv('OUT_DIR', 'outputs/v10_fusion_stage2_local')
-    elif MODEL_VERSION == "V9Lite":
-        model = CLipClassifierWMapV9Lite(clip_type=clip_type, num_class=2)
-        # Use env var OUT_DIR for V9Lite to allow stage2 path override
-        out_dir = os.getenv('OUT_DIR', 'outputs/v9lite')
-    else:
-        model = CLipClassifierWMapV7(clip_type=clip_type, num_class=2)
-        # For V7, allow env var override or default to sdv5_v7
-        out_dir = os.getenv('OUT_DIR', 'outputs/sdv5_v7')
-
-    # Resolve OUT_DIR relative to project root to avoid CWD-dependent loading
-    out_dir_path = Path(out_dir)
-    if not out_dir_path.is_absolute():
-        out_dir_path = (PROJECT_ROOT / out_dir_path).resolve()
-    RESOLVED_OUT_DIR = str(out_dir_path)
-    print(f"[Config] Model weights directory: {out_dir} -> {RESOLVED_OUT_DIR}")
-    
-    possible_names = ['best.pth', 'Val_best.pth', 'latest.pth']
-    
-    if os.path.exists(RESOLVED_OUT_DIR):
-        for name in possible_names:
-            p = os.path.join(RESOLVED_OUT_DIR, name)
-            if os.path.exists(p):
-                ckpt_path = p
-                break
-    
-    if ckpt_path is None:
-        for root, dirs, files in os.walk(RESOLVED_OUT_DIR):
-            for name in possible_names:
-                if name in files:
-                    ckpt_path = os.path.join(root, name)
-                    break
-            if ckpt_path:
-                break
-
-    if ckpt_path and os.path.exists(ckpt_path):
-        print(f"Loading checkpoint from {ckpt_path}")
-        checkpoint = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
-        
-        if isinstance(checkpoint, dict):
-            state_dict = checkpoint.get('state_dict', checkpoint)
-        else:
-            state_dict = checkpoint
-            
-        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        msg = model.load_state_dict(state_dict, strict=False)
-        print(f"Load result: {msg}")
-        LOADED_CKPT_PATH = ckpt_path
-    else:
-        LOADED_CKPT_PATH = None
-        print(f"Warning: No checkpoint found under {RESOLVED_OUT_DIR}! Using random weights.")
-
-    model.to(DEVICE)
-    model.eval()
-    MODEL = model
-    
-    # 3. Initialize Cascade Inference (V9Lite or V10Fusion or V11 or V13)
-    if USE_CASCADE and MODEL_VERSION in ("V9Lite", "V10Fusion", "V11", "V13"):
-        CASCADE_INFERENCE = CascadeInference(
-            model=MODEL,
-            lare_extractor=LARE_EXTRACTOR,
-            trufor_extractor=TRUFOR_EXTRACTOR, # Pass TruFor
-            device=DEVICE,
-            threshold=CASCADE_THRESHOLD
-        )
-        print(f"[Config] Cascade inference enabled (threshold={CASCADE_THRESHOLD})")
-    else:
-        CASCADE_INFERENCE = None
-        print("[Config] Using standard inference")
-    
-    # 4. Initialize Statistical Detector for local tampering
-    global STAT_DETECTOR, DUAL_DETECTOR
-    STAT_DETECTOR = StatisticalLocalDetector()
-    print("[Config] Statistical local detector initialized")
-    
-    # 5. Initialize Dual Model Detector (combines global model + statistical detector)
-    if LARE_EXTRACTOR is not None:
-        DUAL_DETECTOR = DualModelDetector(
-            global_model=MODEL,
-            lare_extractor=LARE_EXTRACTOR,
-            device=DEVICE,
-            global_high_threshold=0.90,
-            global_low_threshold=0.20,
-            local_weight=0.6
-        )
-        print("[Config] Dual model detector initialized")
-    
-    print("Models loaded successfully!")
-
+def load_uploaded_image(file_storage) -> Image.Image:
+    img = Image.open(file_storage.stream)
+    img = ImageOps.exif_transpose(img)
+    return img.convert('RGB')
 
 # Load model on startup
 with app.app_context():
     try:
-        load_model()
+        LAFT_MANAGER.load_models()
     except Exception as e:
         print(f"Error loading model: {e}")
         import traceback
         traceback.print_exc()
 
-
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
         "status": "healthy",
-        "device": DEVICE,
-        "model_loaded": MODEL is not None,
-        "model_version": MODEL_VERSION,
-        "cascade_enabled": CASCADE_INFERENCE is not None,
-        "resolved_out_dir": RESOLVED_OUT_DIR,
-        "ckpt_path": LOADED_CKPT_PATH,
+        "device": LAFT_MANAGER.device,
+        "model_loaded": LAFT_MANAGER.model is not None,
+        "model_version": LAFT_MANAGER.model_version,
+        "cascade_enabled": LAFT_MANAGER.cascade_inference is not None,
+        "resolved_out_dir": LAFT_MANAGER.resolved_out_dir,
+        "ckpt_path": LAFT_MANAGER.loaded_ckpt_path,
     })
-
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -230,352 +86,33 @@ def predict():
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        # Lazy-load if previous init failed
-        if LARE_EXTRACTOR is None or MODEL is None:
-            load_model()
-
-        img = Image.open(file.stream).convert('RGB')
-        
-        # Use cascade inference if available (V9Lite)
-        if CASCADE_INFERENCE is not None:
-            # Note: inference_with_heatmap returns (result_dict, heatmap_overlay_np)
-            # We want pure heatmap for slider comparison
-            result = CASCADE_INFERENCE.inference(img, return_details=True)
-            
-            heatmap_base64 = None
-            
-            # REFACTOR: Use Raw LaRE Map (Reconstruction Error) if available, 
-            # as it provides the most authentic visualization of "Latent Reconstruction Error".
-            # If not, fallback to model's predicted localization map.
-            map_source = None
-            if 'raw_lare_map' in result and result['raw_lare_map'] is not None:
-                map_source = result['raw_lare_map']
-            elif result['loc_map'] is not None:
-                map_source = result['loc_map']
-                
-            # Always generate heatmap if map is available (even if pred is Real, user might want to see WHY)
-            # But usually we only show for AI. Let's stick to showing it for AI or if confidence is high.
-            # User request: "heat map is invalid". We show it if we have it and prediction suggests anomaly.
-            if map_source is not None and (result['pred'] == 1 or result['prob'] > 0.3):
-                loc_np = map_source
-
-                # --- 1. Remove Boundary Artifacts ---
-                # VAE encoding/decoding often creates noise at the very edge.
-                # Previously we cropped 3 pixels which resulted in a ~10% border.
-                # Now we reduce it to 1-2 pixels and use 'edge' padding to blend visually.
-                h, w = loc_np.shape
-                if h > 8 and w > 8:
-                    edge_cut = 1  # Reduced from 3 to 1 to minimize data loss
-                    loc_np_center = loc_np[edge_cut:-edge_cut, edge_cut:-edge_cut]
-                    
-                    # Pad back using 'edge' mode (replicates the inner edge pixels)
-                    # instead of a solid constant color. This removes the "Blue Frame" effect.
-                    loc_np = np.pad(loc_np_center, ((edge_cut, edge_cut), (edge_cut, edge_cut)), 
-                                  mode='edge')
-
-                # --- 2. Advanced Denoising (Morphological Filtering) ---
-                # Reduce "scattered" noise and connect fragmented regions.
-                
-                # A. Percentile clipping first to remove extreme outliers
-                p05, p95 = np.percentile(loc_np, [5, 95])
-                loc_clipped = np.clip(loc_np, p05, p95)
-                
-                # B. Normalize to 0-255 for CV2 ops
-                if p95 - p05 > 1e-6:
-                    loc_byte = ((loc_clipped - p05) / (p95 - p05) * 255).astype(np.uint8)
-                else:
-                    loc_byte = np.zeros_like(loc_clipped, dtype=np.uint8)
-                
-                # C. Morphological Opening (Remove small white noise dots)
-                kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                loc_byte = cv2.morphologyEx(loc_byte, cv2.MORPH_OPEN, kernel_open)
-                
-                # D. Morphological Closing (Fill small black holes in red regions)
-                # Slightly larger kernel to connect nearby hot spots
-                kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                loc_byte = cv2.morphologyEx(loc_byte, cv2.MORPH_CLOSE, kernel_close)
-                
-                # E. Gaussian Blur (Smooth out the blocky edges from morph ops)
-                loc_byte = cv2.GaussianBlur(loc_byte, (5, 5), 0)
-                
-                # F. Thresholding (Optional: Remove weak background noise entirely)
-                # Keep only pixels that are relatively "hot" (> 50/255) in the normalized map
-                # _, loc_byte = cv2.threshold(loc_byte, 50, 255, cv2.THRESH_TOZERO)
-
-                # --- 3. Final Output Generation ---
-                # RESIZE TO ORIGINAL IMAGE SIZE
-                if img is not None:
-                    orig_w, orig_h = img.size
-                    loc_norm = cv2.resize(loc_byte, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-                else:
-                    loc_norm = cv2.resize(loc_byte, (448, 448), interpolation=cv2.INTER_LINEAR)
-                
-                # Apply Colormap
-                heatmap_color = cv2.applyColorMap(loc_norm, cv2.COLORMAP_JET)
-                
-                # 4. Masking Strategy (Make 'Cold' areas transparent/dimmer?)
-                # For now just standard JET map
-                
-                # Convert BGR to RGB
-                heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-                
-                heatmap_pil = Image.fromarray(heatmap_color)
-                buffered = BytesIO()
-                heatmap_pil.save(buffered, format="JPEG", quality=85) # slightly better quality
-                heatmap_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            
-            response = {
-                "class_name": result['class_name'],
-                "confidence": result['prob'],
-                "class_idx": result['pred'],
-                "probabilities": {
-                    CLASS_NAMES[0]: 1 - result['prob'],
-                    CLASS_NAMES[1]: result['prob']
-                },
-                "heatmap": heatmap_base64, # if result['pred'] == 1 else None,
-                "cascade_info": {
-                    "global_prob": result['global_prob'],
-                    "local_prob": result['local_prob'],
-                    "crop_bbox": result['crop_bbox']
-                },
-                "debug": {
-                    "model_version": MODEL_VERSION,
-                    "resolved_out_dir": RESOLVED_OUT_DIR,
-                    "ckpt_path": LOADED_CKPT_PATH,
-                    "cascade_enabled": True,
-                    "cascade_threshold": CASCADE_THRESHOLD,
-                    "ai_confidence_threshold": AI_CONFIDENCE_THRESHOLD,
-                }
-            }
-            return jsonify(response)
-        else:
-            # Standard inference (V8 or V9Lite without cascade)
-            from torchvision import transforms
-            
-            # [V11] Support HighRes Transform
-            preprocess_clip = transforms.Compose([
-                transforms.Resize((448, 448)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
-            ])
-            
-            # ImageNet Norm for Texture Branch
-            preprocess_highres = transforms.Compose([
-                transforms.Resize((512, 512)), # Or whatever --highres_size you trained with
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=(0.485, 0.456, 0.406), 
-                    std=(0.229, 0.224, 0.225),
-                ),
-            ])
-            
-            # [V13] TruFor Preprocessing (Match training gen script)
-            preprocess_trufor = transforms.Compose([
-                transforms.Resize((1024, 1024)),
-                transforms.ToTensor(),
-            ])
-            
-            with torch.no_grad():
-                loss_map = LARE_EXTRACTOR.extract_single(img)
-                # Debug Print
-                lm_mean = loss_map.float().mean().item()
-                lm_max = loss_map.float().max().item()
-                print(f"[DEBUG] Extracted Loss Map - Mean: {lm_mean:.4f}, Max: {lm_max:.4f}")
-                
-                loss_map = loss_map.to(device=DEVICE)
-                
-                clip_input = preprocess_clip(img).unsqueeze(0).to(DEVICE)
-                
-                amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-                try:
-                    from torch.amp import autocast
-                except ImportError:
-                    from torch.cuda.amp import autocast
-
-                with autocast('cuda', dtype=amp_dtype):
-                    # Check if model supports localization or V11 3-inputs
-                    if MODEL_VERSION in ["V11", "V13"]:
-                        highres_input = preprocess_highres(img).unsqueeze(0).to(DEVICE)
-                        
-                        # [V13] TruFor Manual Extraction for Non-Cascade Mode
-                        trufor_map = None
-                        if TRUFOR_EXTRACTOR is not None:
-                             # Use preprocess_trufor (1024x1024)
-                             tf_in = preprocess_trufor(img).unsqueeze(0).to(DEVICE)
-                             tf_np = TRUFOR_EXTRACTOR.extract_batch(tf_in)
-                             if tf_np is not None:
-                                 tf_tensor = torch.from_numpy(tf_np).unsqueeze(1).float()
-                                 # [V13 Fix] Resize to 448x448 to match dataset.py (data_size=448)
-                                 tf_tensor = F.interpolate(tf_tensor, size=(448, 448), mode='bilinear', align_corners=False)
-                                 trufor_map = tf_tensor.to(DEVICE)
-
-                        try:
-                            logits = MODEL(clip_input, highres_input, loss_map, trufor_map=trufor_map)
-                        except TypeError:
-                            logits = MODEL(clip_input, highres_input, loss_map)
-                            
-                        loc_map = None # V11 Fusion doesn't output loc_map yet, using LaRE raw map mainly
-                        # But wait, we can reuse loss_map as the 'loc_map' for visualization if we want
-                        # Actually for V11 we should probably use LaRE map for heatmap.
-                        # Can pass loss_map out?
-                    elif hasattr(MODEL, 'loc_head'):
-                        logits, loc_map = MODEL(clip_input, loss_map, return_loc=True)
-                    else:
-                        logits = MODEL(clip_input, loss_map) # 这个是V8模型
-                        loc_map = None
-                    
-            probs = F.softmax(logits, dim=1)[0]
-        
-        # [V11] Heatmap Handling: Use Raw LaRE Map if V11 (since it uses physics branch)
-        if MODEL_VERSION in ["V11", "V13"]:
-             # Use the raw LaRE map for heatmap visualization
-             loc_map = loss_map # [1, 4, 32, 32]
-             
-             # Need to aggregate channels if 4 channel
-             if loc_map.shape[1] == 4:
-                 loc_map = loc_map.mean(dim=1, keepdim=True) # [1, 1, 32, 32]
-
-        confidence, pred_idx = torch.max(probs, 0)
-        
-        # Apply higher threshold for AI classification to reduce false positives
-        ai_prob = probs[1].item()
-        if ai_prob < AI_CONFIDENCE_THRESHOLD:
-            pred_idx = torch.tensor(0)  # Force to Real
-            confidence = torch.tensor(1.0 - ai_prob)
-        
-        idx = int(pred_idx.item())
-        
-        # Generate heatmap if AI detected and localization available
-        # [V11] Enable high-quality heatmap using LaRE map for V11
-        use_heatmap = True if (MODEL_VERSION in ["V11", "V13"]) else False
-        
-        # Initialize heatmap_base64
-        heatmap_base64 = None
-
-        if use_heatmap and (idx == 1 or MODEL_VERSION in ["V11", "V13"]) and loc_map is not None:
-            # 1. Prepare Data
-            loc_np = loc_map.squeeze().cpu().float().numpy()
-            
-            # --- Robust Semantic Filtering (DenseCRF-like) for V11 ---
-            # Using Guided Filter to align heatmap with image edges
-            
-            # A. Basic Cleanup (Remove boundary artifacts & Clip)
-            h, w = loc_np.shape
-            if h > 8 and w > 8:
-                edge_cut = 1
-                loc_np = loc_np[edge_cut:-edge_cut, edge_cut:-edge_cut]
-                loc_np = np.pad(loc_np, ((edge_cut, edge_cut), (edge_cut, edge_cut)), mode='edge')
-
-            # B. Percentile Normalization (Robust min-max)
-            p05, p95 = np.percentile(loc_np, [5, 95])
-            loc_clipped = np.clip(loc_np, p05, p95)
-            if p95 - p05 > 1e-6:
-                loc_norm_float = (loc_clipped - p05) / (p95 - p05)
-            else:
-                loc_norm_float = np.zeros_like(loc_clipped)
-            
-            # C. Morphological Opening (Remove small isolated noise dots)
-            # Convert to uint8 for morph ops
-            loc_byte = (loc_norm_float * 255).astype(np.uint8)
-            kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            loc_byte = cv2.morphologyEx(loc_byte, cv2.MORPH_OPEN, kernel_open)
-            
-            # D. Guided Filter (The "DenseCRF" substitute)
-            # Needs original image as guide. 
-            if img is not None:
-                 # Convert PIL to CV2 BGR
-                 guide_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                 orig_w, orig_h = img.size
-                 
-                 # Resize heatmap to match guide image EXACTLY
-                 # Note: Guided Filter works best when src and guide match size
-                 loc_upscaled = cv2.resize(loc_byte, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-                 
-                 try:
-                     from cv2.ximgproc import guidedFilter
-                     # Guided Filter: effective at edge-preserving smoothing
-                     # radius: neighborhood size (larger -> more smoothing)
-                     # eps: regularization (larger -> more strict edge adherence)
-                     refined_map = guidedFilter(guide=guide_img, src=loc_upscaled, radius=16, eps=500, dDepth=-1)
-                     
-                     # Normalize again after filtering
-                     refined_map = cv2.normalize(refined_map, None, 0, 255, cv2.NORM_MINMAX)
-                     loc_final = refined_map.astype(np.uint8)
-                 except ImportError:
-                     print("[HTM] cv2.ximgproc not found, falling back to Bilateral Filter")
-                     # Fallback: Bilateral Filter (heatmap self-guided)
-                     loc_upscaled = cv2.bilateralFilter(loc_upscaled, d=9, sigmaColor=75, sigmaSpace=75)
-                     loc_final = loc_upscaled
-            else:
-                 # No guide image available, resize only
-                 loc_final = cv2.resize(loc_byte, (448, 448), interpolation=cv2.INTER_LINEAR)
-
-            # E. Final Colormap
-            heatmap_color = cv2.applyColorMap(loc_final, cv2.COLORMAP_JET)
-            heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-            
-            # F. Alpha Blending Preparation (Optional, frontend handles opacity, strictly return RGB)
-            heatmap_pil = Image.fromarray(heatmap_color)
-            
-            buffered = BytesIO()
-            heatmap_pil.save(buffered, format="JPEG", quality=90)
-            heatmap_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-        
-        response = {
-            "class_name": CLASS_NAMES[idx],
-            "confidence": float(confidence.item()),
-            "class_idx": idx,
-            "probabilities": {
-                CLASS_NAMES[0]: float(probs[0]),
-                CLASS_NAMES[1]: float(probs[1])
-                },
-                "heatmap": heatmap_base64,
-                "debug": {
-                    "model_version": MODEL_VERSION,
-                    "resolved_out_dir": RESOLVED_OUT_DIR,
-                    "ckpt_path": LOADED_CKPT_PATH,
-                    "cascade_enabled": False,
-                    "cascade_threshold": CASCADE_THRESHOLD,
-                    "ai_confidence_threshold": AI_CONFIDENCE_THRESHOLD,
-                }
-        }
-        
+        img = load_uploaded_image(file)
+        response = LAFT_MANAGER.predict(img)
         print(f"Prediction: {response['class_name']} ({response['confidence']:.2f})")
         return jsonify(response)
-
     except Exception as e:
         print(f"Prediction error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
 @app.route('/config', methods=['GET'])
 def get_config():
     """Return current model configuration"""
     return jsonify({
-        "model_version": MODEL_VERSION,
-        "cascade_enabled": CASCADE_INFERENCE is not None,
-        "cascade_threshold": CASCADE_THRESHOLD,
-        "ai_confidence_threshold": AI_CONFIDENCE_THRESHOLD,
+        "model_version": LAFT_MANAGER.model_version,
+        "cascade_enabled": LAFT_MANAGER.cascade_inference is not None,
+        "cascade_threshold": LAFT_MANAGER.cascade_threshold,
+        "ai_confidence_threshold": LAFT_MANAGER.ai_confidence_threshold,
         "lare_model_type": os.getenv("LARE_MODEL_TYPE", "sdxl"),
-        "device": DEVICE,
-        "dual_detector_enabled": DUAL_DETECTOR is not None,
-        "resolved_out_dir": RESOLVED_OUT_DIR,
-        "ckpt_path": LOADED_CKPT_PATH,
+        "device": LAFT_MANAGER.device,
+        "dual_detector_enabled": LAFT_MANAGER.dual_detector is not None,
+        "resolved_out_dir": LAFT_MANAGER.resolved_out_dir,
+        "ckpt_path": LAFT_MANAGER.loaded_ckpt_path,
     })
-
 
 @app.route('/predict_dual', methods=['POST'])
 def predict_dual():
-    """
-    双模型协同检测API
-    - 全局模型：检测完全AI生成的图像
-    - 统计检测器：检测局部篡改
-    """
     if 'file' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
@@ -584,30 +121,21 @@ def predict_dual():
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        if DUAL_DETECTOR is None:
+        if LAFT_MANAGER.dual_detector is None:
             return jsonify({"error": "Dual detector not initialized"}), 500
 
-        img = Image.open(file.stream).convert('RGB')
+        img = load_uploaded_image(file)
+        result = LAFT_MANAGER.dual_detector.predict(img)
         
-        # 双模型检测
-        result = DUAL_DETECTOR.predict(img)
-        
-        # 生成热力图（如果有定位信息）
         heatmap_base64 = None
         if result['loc_map'] is not None:
             loc_np = result['loc_map']
-            
-            # 平滑和归一化
             loc_np = cv2.GaussianBlur(loc_np.astype(np.float32), (5, 5), 0)
             if loc_np.max() > loc_np.min():
                 loc_norm = ((loc_np - loc_np.min()) / (loc_np.max() - loc_np.min()) * 255).astype(np.uint8)
             else:
                 loc_norm = np.zeros_like(loc_np, dtype=np.uint8)
-            
-            # 放大到显示尺寸
             loc_norm = cv2.resize(loc_norm, (448, 448), interpolation=cv2.INTER_LINEAR)
-            
-            # 应用色彩映射
             heatmap_color = cv2.applyColorMap(loc_norm, cv2.COLORMAP_JET)
             heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
             
@@ -635,32 +163,26 @@ def predict_dual():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
 @app.route('/analyze_lare', methods=['POST'])
 def analyze_lare():
-    """
-    分析LaRE特征分布（调试用）
-    """
     if 'file' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
     file = request.files['file']
     try:
-        img = Image.open(file.stream).convert('RGB')
+        img = load_uploaded_image(file)
         
-        if LARE_EXTRACTOR is None:
+        if LAFT_MANAGER.lare_extractor is None:
             return jsonify({"error": "LaRE extractor not loaded"}), 500
         
-        # 提取LaRE
-        loss_map = LARE_EXTRACTOR.extract_single(img)
+        loss_map = LAFT_MANAGER.lare_extractor.extract_single(img)
         
-        # 分析
-        if STAT_DETECTOR is None:
+        if LAFT_MANAGER.stat_detector is None:
             return jsonify({"error": "Statistical detector not initialized"}), 500
         
-        stats = STAT_DETECTOR.analyze(loss_map)
-        is_tampered, score, _ = STAT_DETECTOR.detect(loss_map)
-        explanation = STAT_DETECTOR.get_explanation(loss_map)
+        stats = LAFT_MANAGER.stat_detector.analyze(loss_map)
+        is_tampered, score, _ = LAFT_MANAGER.stat_detector.detect(loss_map)
+        explanation = LAFT_MANAGER.stat_detector.get_explanation(loss_map)
         
         return jsonify({
             "is_local_tampered": is_tampered,
@@ -683,6 +205,49 @@ def analyze_lare():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/explain_logic_stream', methods=['POST'])
+@app.route('/explain_logic_stream', methods=['POST'])
+def explain_logic_stream():
+    data = request.json
+    if not data or 'image' not in data:
+        return jsonify({"error": "缺少图片数据"}), 400
+        
+    base64_image = data['image']
+    is_fake = data.get('is_fake', False)
+    
+    def generate():
+        try:
+            for chunk in explain_logic_with_qwen_stream(base64_image, is_fake):
+                yield chunk
+        except Exception as e:
+            yield f"\n[发生错误] {str(e)}\n"
+            
+    return Response(stream_with_context(generate()), mimetype='text/plain')
+
+@app.route('/api/explain_logic', methods=['POST'])
+@app.route('/explain_logic', methods=['POST'])
+def explain_logic():
+    try:
+        data = request.json
+        if not data or 'image' not in data:
+            return jsonify({"error": "缺少图片数据"}), 400
+            
+        base64_image = data['image']
+        is_fake = data.get('is_fake', False)
+        
+        result = explain_logic_with_qwen(base64_image, is_fake)
+        return jsonify(result)
+
+    except OllamaTimeoutError as e:
+        return jsonify({"error": str(e)}), 504
+
+    except OllamaConnectionError as e:
+        return jsonify({"error": str(e)}), 503
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, threaded=False)

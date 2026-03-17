@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -60,7 +60,13 @@
 
                     <!-- Heatmap Container (Interactive Slider) -->
                     <div id="heatmap-container" class="heatmap-wrapper hidden">
-                        <h4><i class="fa-solid fa-layer-group"></i> 分析对比</h4>
+                        <div class="heatmap-header">
+                            <h4><i class="fa-solid fa-layer-group"></i> 分析对比</h4>
+                            <div class="heatmap-tools">
+                                <button id="roi-box-toggle" class="align-debug-btn on" type="button">ROI框：开</button>
+                                <button id="align-debug-toggle" class="align-debug-btn" type="button">对齐调试：关</button>
+                            </div>
+                        </div>
                         <p class="heatmap-desc">拖动滑块查看 AI 异常热力图。</p>
                         
                         <div class="comparison-container" id="comparison-slider">
@@ -73,6 +79,7 @@
                                 <img id="original-fg" src="" alt="Original">
                                 <span class="label-badge label-original">原图</span>
                             </div>
+                            <div id="roi-box" class="roi-box hidden"></div>
                             
                             <!-- Handle -->
                             <div class="slider-handle" id="slider-handle"></div>

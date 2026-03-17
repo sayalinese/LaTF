@@ -171,16 +171,11 @@ class TruForExtractor:
                 else:
                     out = outputs
 
-                # Convert Logits to Probability
-                prob_map = torch.sigmoid(out)
-                
-                # Check dimensions and handle multi-class (B, 2, H, W)
-                if prob_map.dim() == 4:
-                    if prob_map.shape[1] == 2:
-                        # Take channel 1 (Fake class)
-                        prob_map = prob_map[:, 1, :, :]
-                    elif prob_map.shape[1] == 1:
-                        # Remove channel dim
+                if out.dim() == 4 and out.shape[1] == 2:
+                    prob_map = torch.softmax(out, dim=1)[:, 1, :, :]
+                else:
+                    prob_map = torch.sigmoid(out)
+                    if prob_map.dim() == 4 and prob_map.shape[1] == 1:
                         prob_map = prob_map.squeeze(1)
                 
                 prob_map = prob_map.cpu().numpy()

@@ -18,8 +18,11 @@ from dotenv import load_dotenv
 
 # Add project root to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 load_dotenv(PROJECT_ROOT / '.env')
+
+from service.heatmap_utils import refine_map_for_visibility
 
 from service.trufor_wrapper import TruForExtractor
 
@@ -41,13 +44,23 @@ BATCH_SIZE = 8
 NUM_WORKERS = 4
 INPUT_RESIZE = (1024, 1024) # Resize for consistent GPU batching
 
+EXCLUDED_DIR_NAMES = {'masks', 'masks_vis'}
+
+
+def should_skip_path(path_like) -> bool:
+    p = Path(path_like)
+    parts_lower = {part.lower() for part in p.parts}
+    return not parts_lower.isdisjoint(EXCLUDED_DIR_NAMES)
+
+
 class TruForListDataset(Dataset):
-    def __init__(self, file_list, root_dir, output_dir, transform=None):
+    def __init__(self, file_list, root_dir, output_dir, transform=None, overwrite=False):
         self.files = file_list
         # root_dir is PROJECT_ROOT -> D:\三创\LaRE-main
         self.root_dir = Path(root_dir)
         self.output_dir = Path(output_dir)
         self.transform = transform
+        self.overwrite = overwrite
         
     def __len__(self):
         return len(self.files)
@@ -78,7 +91,7 @@ class TruForListDataset(Dataset):
 
         # Check if exists
         try:
-            if save_path.exists():
+            if save_path.exists() and not self.overwrite:
                  return None # Skip signal
 
             # Ensure parent dir exists
@@ -102,7 +115,10 @@ def parse_annotation_files(file_paths, strict_alignment: bool, lare_map_file: st
         if doubao_path.exists():
              print("Scanning data/doubao directory for full coverage...")
              # rglob matches recursively
-             doubao_files = [str(f) for f in doubao_path.rglob('*') if f.suffix.lower() in {'.png', '.jpg', '.jpeg'}]
+             doubao_files = [
+                 str(f) for f in doubao_path.rglob('*')
+                 if f.suffix.lower() in {'.png', '.jpg', '.jpeg'} and not should_skip_path(f)
+             ]
              print(f"  Found {len(doubao_files)} Doubao images")
              all_images.extend(doubao_files)
 
@@ -135,7 +151,8 @@ def parse_annotation_files(file_paths, strict_alignment: bool, lare_map_file: st
                     # Check if exists directly first
                     abs_p = Path(raw_path)
                     if abs_p.exists():
-                        all_images.append(str(abs_p))
+                        if not should_skip_path(abs_p):
+                            all_images.append(str(abs_p))
                         continue
                     
                     # If not, try relative fix
@@ -147,7 +164,8 @@ def parse_annotation_files(file_paths, strict_alignment: bool, lare_map_file: st
                         # Reconstruct "D:\三创\LaRE-main\data\Real\FFHQ\..."
                         abs_path = PROJECT_ROOT / rel_path
                         if abs_path.exists():
-                            all_images.append(str(abs_path))
+                            if not should_skip_path(abs_path):
+                                all_images.append(str(abs_path))
                         # else:
                         #     print(f"Missing: {abs_path}")
 
@@ -166,7 +184,11 @@ def custom_collate(batch):
     paths = [item['save_path'] for item in batch]
     return imgs, paths
 
-def process_loader(extractor, loader):
+
+
+
+
+def process_loader(extractor, loader, boost_black_fill, dark_threshold, fill_min_area_ratio):
     for batch in tqdm(loader, desc="Processing Batch"):
         if batch is None:
             continue
@@ -183,9 +205,14 @@ def process_loader(extractor, loader):
 
             for i, save_p in enumerate(paths):
                 prob_map = prob_maps[i]
-                
-                # prob_map is float 0-1
-                norm_map = (prob_map * 255).astype(np.uint8)
+                src_img = imgs[i].cpu().numpy() if i < imgs.shape[0] else None
+                norm_map = refine_map_for_visibility(
+                    prob_map,
+                    src_img,
+                    boost_black_fill=boost_black_fill,
+                    dark_threshold=dark_threshold,
+                    fill_min_area_ratio=fill_min_area_ratio,
+                )
                 
                 # Resize output to 512x512 standard
                 resized_map = cv2.resize(norm_map, (512, 512), interpolation=cv2.INTER_LINEAR)
@@ -214,6 +241,11 @@ def main():
     parser.add_argument('--num_workers', type=int, default=NUM_WORKERS)
     parser.add_argument('--input_resize', nargs=2, type=int, default=list(INPUT_RESIZE))
     parser.add_argument('--max_images', type=int, default=0)
+    parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--black_fill_boost', action='store_true', default=True)
+    parser.add_argument('--no_black_fill_boost', action='store_false', dest='black_fill_boost')
+    parser.add_argument('--dark_threshold', type=int, default=35)
+    parser.add_argument('--fill_min_area_ratio', type=float, default=0.001)
     args = parser.parse_args()
     
     device = f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu'
@@ -249,7 +281,7 @@ def main():
         print("No files found!")
         return
 
-    dataset = TruForListDataset(all_files, PROJECT_ROOT, base_out, transform=transform)
+    dataset = TruForListDataset(all_files, PROJECT_ROOT, base_out, transform=transform, overwrite=args.overwrite)
     
     loader = DataLoader(
         dataset, 
@@ -261,7 +293,13 @@ def main():
     
     # 4. Process
     print(f"Starting processing of {len(all_files)} images...")
-    process_loader(extractor, loader)
+    process_loader(
+        extractor,
+        loader,
+        boost_black_fill=args.black_fill_boost,
+        dark_threshold=args.dark_threshold,
+        fill_min_area_ratio=args.fill_min_area_ratio,
+    )
             
     print("\n✅ All TruFor features generated!")
 

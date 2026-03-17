@@ -30,6 +30,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const sliderContainer = document.getElementById("comparison-slider");
     const sliderHandle = document.getElementById("slider-handle");
     const imgOverlay = document.getElementById("img-overlay");
+    const roiBox = document.getElementById("roi-box");
+    const roiBoxToggle = document.getElementById("roi-box-toggle");
+    const alignDebugToggle = document.getElementById("align-debug-toggle");
 
     // Model info badge
     const modelInfoBadge = document.getElementById("model-info-badge");
@@ -40,6 +43,61 @@ document.addEventListener("DOMContentLoaded", () => {
     
     let currentFile = null;
     let originalImageSrc = null;
+    let alignDebugEnabled = false;
+    let roiBoxEnabled = true;
+    let lastResult = null;
+    let lastHeatmapNaturalSize = null;
+
+    function setAlignDebug(enabled) {
+        alignDebugEnabled = Boolean(enabled);
+        if (sliderContainer) {
+            sliderContainer.classList.toggle("align-debug", alignDebugEnabled);
+        }
+        if (alignDebugToggle) {
+            alignDebugToggle.classList.toggle("on", alignDebugEnabled);
+            alignDebugToggle.textContent = alignDebugEnabled ? "对齐调试：开" : "对齐调试：关";
+        }
+    }
+
+    function setRoiBoxEnabled(enabled) {
+        roiBoxEnabled = Boolean(enabled);
+        if (roiBoxToggle) {
+            roiBoxToggle.classList.toggle("on", roiBoxEnabled);
+            roiBoxToggle.textContent = roiBoxEnabled ? "ROI框：开" : "ROI框：关";
+        }
+        updateRoiBox();
+    }
+
+    function updateRoiBox() {
+        if (!roiBox) return;
+        const bbox = lastResult?.cascade_info?.crop_bbox;
+        const size = lastHeatmapNaturalSize;
+
+        if (!roiBoxEnabled || !bbox || !size || bbox.length !== 4) {
+            roiBox.classList.add("hidden");
+            return;
+        }
+
+        const [x1, y1, x2, y2] = bbox;
+        const containerW = sliderContainer.offsetWidth;
+        const containerH = sliderContainer.offsetHeight;
+        const scale = Math.min(containerW / size.w, containerH / size.h);
+        const renderW = size.w * scale;
+        const renderH = size.h * scale;
+        const offsetX = (containerW - renderW) / 2;
+        const offsetY = (containerH - renderH) / 2;
+
+        const left = offsetX + x1 * scale;
+        const top = offsetY + y1 * scale;
+        const width = Math.max(1, (x2 - x1) * scale);
+        const height = Math.max(1, (y2 - y1) * scale);
+
+        roiBox.style.left = `${left}px`;
+        roiBox.style.top = `${top}px`;
+        roiBox.style.width = `${width}px`;
+        roiBox.style.height = `${height}px`;
+        roiBox.classList.remove("hidden");
+    }
 
     // --- Slider Logic ---
     let isDragging = false;
@@ -91,18 +149,30 @@ document.addEventListener("DOMContentLoaded", () => {
         // Update elements
         sliderHandle.style.left = x + 'px';
         imgOverlay.style.width = x + 'px';
-        
-        // CRITICAL: Keep inner image width equal to container width to prevent squashing
-        originalFg.style.width = containerWidth + 'px';
     }
     
     // Resize observer to handle window resizing
     new ResizeObserver(() => {
         updateSliderPosition(parseFloat(sliderHandle.style.left) || sliderContainer.offsetWidth / 2);
+        updateRoiBox();
     }).observe(sliderContainer);
 
     initSlider();
+    setAlignDebug(false);
+    setRoiBoxEnabled(true);
     // --------------------
+
+    if (roiBoxToggle) {
+        roiBoxToggle.addEventListener("click", () => {
+            setRoiBoxEnabled(!roiBoxEnabled);
+        });
+    }
+
+    if (alignDebugToggle) {
+        alignDebugToggle.addEventListener("click", () => {
+            setAlignDebug(!alignDebugEnabled);
+        });
+    }
 
     if (debugToggle && debugPre) {
         debugToggle.addEventListener('click', () => {
@@ -226,6 +296,9 @@ document.addEventListener("DOMContentLoaded", () => {
     function resetUI() {
         currentFile = null;
         fileInput.value = "";
+        lastResult = null;
+        lastHeatmapNaturalSize = null;
+        if (roiBox) roiBox.classList.add("hidden");
         uploadArea.classList.remove("hidden");
         previewContainer.classList.add("hidden");
         resultContainer.classList.add("hidden");
@@ -269,6 +342,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function displayResult(data) {
         resultContent.classList.remove("hidden");
+        lastResult = data;
         
         const isFake = data.class_name === "AI Generated";
         const probFakeVal = data.probabilities["AI Generated"];
@@ -293,6 +367,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 const natW = heatmapBg.naturalWidth;
                 const natH = heatmapBg.naturalHeight;
                 if (!natW || !natH) return; // Guard
+                lastHeatmapNaturalSize = { w: natW, h: natH };
 
                 // Use the preview container width as reference since it's the parent width constraint
                 const containerW = previewContainer.offsetWidth;
@@ -310,12 +385,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 sliderContainer.style.marginLeft = 'auto';
                 sliderContainer.style.marginRight = 'auto';
                 
-                // Ensure the inner original image matches container width exactly
-                originalFg.style.width = maxW + 'px';
-                originalFg.style.height = displayH + 'px'; // Explicitly set height to avoid distortion
-                
                 // IMPORTANT: Reset slider pos
                 updateSliderPosition(maxW / 2);
+                updateRoiBox();
             };
 
             // Reset slider to middle (fallback)
@@ -324,6 +396,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (heatmapBg.complete) heatmapBg.onload();
             }, 50);
         } else {
+            lastHeatmapNaturalSize = null;
+            if (roiBox) roiBox.classList.add("hidden");
             heatmapContainer.classList.add("hidden");
         }
         

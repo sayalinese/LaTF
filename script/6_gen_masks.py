@@ -25,7 +25,7 @@ def process_single_image(fake_path_str):
              if possible_reals:
                  real_path = possible_reals[0]
              else:
-                 return 'skipped'
+                 return ('skipped', filename)
 
         # Read Images
         # Use numpy fromfile for Windows path compatibility
@@ -135,22 +135,29 @@ def generate_masks():
     count_skipped = 0
     count_error = 0
     deleted_list = []
+    skipped_list = []
     
     with Pool(processes=cpu_count()) as pool:
         # Use imap to get progress bar
         for result in tqdm(pool.imap_unordered(process_single_image, file_list), total=len(file_list)):
-            if isinstance(result, tuple) and result[0] == 'deleted':
-                deleted_list.append(result[1])
-                count_skipped += 1
-            elif isinstance(result, tuple) and result[0] == 'error_deleting':
-                print(f"[Delete Error] {result[1]}")
-                count_error += 1
-            elif result == 'success':
-                count_success += 1
-            elif result == 'skipped':
-                count_skipped += 1
+            if isinstance(result, tuple):
+                tag, val = result[0], result[1]
+                if tag == 'deleted':
+                    deleted_list.append(val)
+                    count_skipped += 1
+                elif tag == 'skipped':
+                    skipped_list.append(val)
+                    count_skipped += 1
+                elif tag == 'error_deleting':
+                    print(f"[Delete Error] {val}")
+                    count_error += 1
+                else:
+                    count_error += 1
             else:
-                count_error += 1
+                if result == 'success':
+                    count_success += 1
+                else:
+                    count_error += 1
                 
     print(f"\nProcessing Complete!")
     print(f"- Generated: {count_success}")
@@ -163,6 +170,10 @@ def generate_masks():
         # print("Files deleted:")
         # for fname in deleted_list:
         #     print(f" -> {fname}")
+    if len(skipped_list) > 0:
+        print(f"\n[Skipped Report] {len(skipped_list)} fake images had no matching real image:")
+        for fname in skipped_list:
+            print(f" -> {fname}")
             
     print(f"- Masks saved to: {MASK_DIR}")
 

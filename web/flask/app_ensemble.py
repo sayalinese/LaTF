@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageOps
 import os
 import sys
 from pathlib import Path
@@ -29,6 +29,12 @@ LARE_SD15 = None
 LARE_SDXL = None
 
 CLASS_NAMES = ["Real Photo", "AI Generated"]
+
+
+def load_uploaded_image(file_storage) -> Image.Image:
+    img = Image.open(file_storage.stream)
+    img = ImageOps.exif_transpose(img)
+    return img.convert('RGB')
 
 def load_models():
     global MODEL_SD15, MODEL_SDXL_CLASSIFIER, LARE_SD15, LARE_SDXL
@@ -131,7 +137,7 @@ def predict():
         return jsonify({"error": "No file selected"}), 400
 
     try:
-        img = Image.open(file.stream).convert('RGB')
+        img = load_uploaded_image(file)
         
         with torch.no_grad():
             # 双模型预测
