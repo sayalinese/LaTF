@@ -16,7 +16,8 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:5000', // Flask 后端地址
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, '')
+        rewrite: (path) => path.replace(/^\/api/, ''),
+        cookieDomainRewrite: { '127.0.0.1': 'localhost', '*': '' }
       }
     }
   }

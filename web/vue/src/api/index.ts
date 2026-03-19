@@ -205,3 +205,29 @@ export const joinSession = async (sessionId: string) => {
   const res = await apiClient.post(`/sessions/${sessionId}/join`);
   return res.data;
 };
+
+export const assistantChatStream = async (
+  sessionId: string,
+  message: string,
+  history: Array<{ role: string; content: string }>,
+  onChunk: (chunk: string) => void
+): Promise<void> => {
+  const response = await fetch(`/api/sessions/${sessionId}/assistant_chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ message, history })
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ message: '请求失败' }));
+    throw new Error(err.message || `请求失败: ${response.status}`);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("无法读取流数据");
+  const decoder = new TextDecoder('utf-8');
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) onChunk(decoder.decode(value, { stream: true }));
+  }
+};

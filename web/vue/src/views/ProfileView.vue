@@ -297,7 +297,6 @@ const cancelEdit = () => {
             </div>
             <div class="user-titles">
               <h2>{{ userInfo.nickname }}</h2>
-              <span class="role-badge"><i class="fa-solid fa-shield-check"></i> 高级鉴定师认证</span>
             </div>
             <button class="logout-btn" @click="handleLogout" title="退出登录">
               <i class="fa-solid fa-power-off"></i>

@@ -24,6 +24,11 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False  # Support Chinese characters
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'lare-dev-secret-key-2026')
+# Session cookie 配置（开发环境）
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = False   # HTTP 开发环境不需要 HTTPS
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_PATH'] = '/'
 
 # 上传文件配置
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -42,7 +47,7 @@ from models import db, migrate, User, DisputeSession, Message
 db.init_app(app)
 migrate.init_app(app, db)
 
-CORS(app, supports_credentials=True)  # Allow Cross-Origin requests with cookies
+CORS(app, supports_credentials=True, origins=['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173'])  # Flask-CORS 6.x 必须指定 origins，否则 credentials 会被浏览器拒绝
 
 # 导入重构后的模块 (位于 web/flask/flask_service 下)
 try:
@@ -654,5 +659,111 @@ def detect_message():
         return jsonify({"success": False, "message": f"检测失败: {str(e)}"}), 500
 
 
+# --- 悬浮 AI 小助手：基于会话上下文的智能分析 ---
+@app.route('/sessions/<session_id>/assistant_chat', methods=['POST'])
+def assistant_chat(session_id):
+    current_user_id = flask_session.get('user_id')
+    if not current_user_id:
+        return jsonify({"success": False, "message": "请先登录"}), 401
+
+    s, err = _check_session(session_id, current_user_id)
+    if err:
+        return err
+
+    data = request.json or {}
+    user_message = (data.get('message') or '').strip()
+    if not user_message:
+        return jsonify({"success": False, "message": "消息不能为空"}), 400
+
+    # 对话历史（前端传来的助手对话记录，保持上下文连贯）
+    history = data.get('history', [])
+
+    # 确定当前用户角色
+    if s.buyer_id == current_user_id:
+        user_role = '买家'
+        opponent_role = '卖家'
+    else:
+        user_role = '卖家'
+        opponent_role = '买家'
+
+    # 获取会话聊天记录作为背景上下文
+    chat_messages = Message.query.filter_by(session_id=s.id).order_by(Message.created_at.asc()).all()
+    chat_context_lines = []
+    for m in chat_messages[-30:]:  # 最近 30 条
+        sender = User.query.get(m.sender_id)
+        name = sender.nickname if sender else m.sender_id
+        is_me = (m.sender_id == current_user_id)
+        role_label = '买家' if m.sender_id == s.buyer_id else '卖家'
+        side_label = '【我方】' if is_me else '【对方】'
+        if m.content_type == 'image':
+            content_desc = '[发送了一张图片]'
+            if m.ai_detect_data:
+                det = m.ai_detect_data
+                cls = det.get('class_name', '未知')
+                conf = det.get('confidence', 0)
+                content_desc += f' (AI鉴定结果: {cls}, 置信度: {conf:.1%})'
+        else:
+            content_desc = m.content
+        chat_context_lines.append(f"{side_label}({role_label}/{name}): {content_desc}")
+
+    chat_context = '\n'.join(chat_context_lines) if chat_context_lines else '(暂无聊天记录)'
+
+    sys_prompt = (
+        "你是一个交易纠纷 AI 小助手，帮助用户分析纠纷会话中的可疑行为和风险点。\n\n"
+        f"## 身份说明\n"
+        f"- 当前使用助手的用户（即"我方"）身份是：**{user_role}**\n"
+        f"- 对方身份是：**{opponent_role}**\n"
+        f"- 聊天记录中每条消息已用【我方】或【对方】明确标注\n\n"
+        "## 你的职责\n"
+        "1. 分析【对方】的聊天行为，判断是否存在可疑行为（虚假承诺、前后矛盾、回避关键问题等）\n"
+        "2. 如果聊天中有图片且已被 AI 鉴定为伪造，结合鉴定结果给出风险提示\n"
+        "3. 站在【我方】角度，提供维权建议和沟通策略\n"
+        "4. 回答用户关于纠纷处理的疑问\n\n"
+        "## 注意事项\n"
+        "- 回答时「你」或「我方」始终指当前用户（即使用本助手的人）\n"
+        "- 「对方」始终指交易另一方\n"
+        "- 请简明扼要，重点突出，使用 Markdown 格式，控制在 300 字以内\n\n"
+        "===== 当前纠纷会话聊天记录 =====\n"
+        f"{chat_context}\n"
+        "===== 聊天记录结束 ====="
+    )
+
+    # 构建调用消息: system + history + user
+    api_messages = [{"role": "system", "content": sys_prompt}]
+    for h in history[-10:]:  # 保留最近 10 轮助手对话
+        api_messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+    api_messages.append({"role": "user", "content": user_message})
+
+    api_key = os.getenv("SILICONFLOW_API_KEY", "")
+    base_url = os.getenv("SILICONFLOW_URL", "https://api.siliconflow.cn/v1")
+    if base_url.endswith("/chat/completions"):
+        base_url = base_url.replace("/chat/completions", "")
+    model = os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen2.5-VL-72B-Instruct")
+
+    if not api_key or api_key == "your_siliconflow_api_key_here":
+        return jsonify({"success": False, "message": "AI 服务未配置 API Key"}), 503
+
+    def generate():
+        try:
+            from openai import OpenAI as _OpenAI
+            client = _OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=api_messages,
+                stream=True,
+                timeout=60
+            )
+            for chunk in response:
+                if not chunk.choices:
+                    continue
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+        except Exception as exc:
+            yield f"\n[AI 服务请求失败]: {str(exc)}\n"
+
+    return Response(stream_with_context(generate()), mimetype='text/plain')
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=False)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)  # threaded=True: 流式响应不阻塞其他请求

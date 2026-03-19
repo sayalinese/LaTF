@@ -449,10 +449,10 @@ const handleExplainLogic = async () => {
 }
 
 .vlm-trigger-block {
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(139, 92, 246, 0.06);
   border-radius: 12px;
   padding: 20px;
-  border: 1px dashed var(--border-color);
+  border: 1px dashed rgba(139, 92, 246, 0.25);
   flex: 1;
 }
 

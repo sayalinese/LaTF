@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { fetchSessions, fetchSessionMessages, sendTextMessage, sendImageMessage, detectMessage, explainLogicStream, createSession, updateSession, deleteSession, joinSession } from '../api';
 import { useUserStore } from '../stores/user';
+import FloatingAssistant from '../components/session/FloatingAssistant.vue';
 
 const { state: userState } = useUserStore();
 const router = useRouter();
@@ -670,6 +671,12 @@ const handleImageUpload = async (event: Event) => {
       </div>
     </transition>
   </teleport>
+
+  <!-- 悬浮 AI 小助手 -->
+  <FloatingAssistant
+    :session-id="activeSession ? activeSession.id : null"
+    :session-title="activeSession ? activeSession.title : ''"
+  />
 </template>
 
 <style scoped>
