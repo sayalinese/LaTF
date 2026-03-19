@@ -150,6 +150,13 @@ class LaREDeepFakeV11(nn.Module):
             trufor_map: [B, 1, 512, 512] (TruFor prob map) - Optional
             return_seg: If True, returns segmentation logits mapping
         """
+        # 统一转为 float32，避免 bf16/fp16 混合精度导致 torch.cat dtype mismatch 或 NaN
+        img_clip = img_clip.float()
+        img_highres = img_highres.float()
+        lare_map = lare_map.float()
+        if trufor_map is not None:
+            trufor_map = trufor_map.float()
+
         # 1. Semantic Features (CLIP)
         with torch.no_grad():
             semantic_feat = self.clip_model.encode_image(img_clip)
@@ -157,7 +164,7 @@ class LaREDeepFakeV11(nn.Module):
         
         # 2. Texture Features (ConvNeXt)
         # 支持梯度更新，专门学习伪造纹理
-        texture_feat = self.texture_branch(img_highres)
+        texture_feat = self.texture_branch(img_highres).float()
         
         # 3. LaRE Map + TruFor Map Processing
         # Note: trufor_map could be None if user forgot to pass it
@@ -176,7 +183,7 @@ class LaREDeepFakeV11(nn.Module):
              zeros = torch.zeros((batch_size, 1, h, w), device=lare_map.device, dtype=lare_map.dtype)
              map_input = torch.cat([lare_map, zeros], dim=1)
 
-        lare_feat = self.lare_conv(map_input).flatten(1)
+        lare_feat = self.lare_conv(map_input).flatten(1).float()
         
         # 4. Feature Fusion
         combined = torch.cat([semantic_feat, texture_feat, lare_feat], dim=1)
@@ -184,12 +191,8 @@ class LaREDeepFakeV11(nn.Module):
         
         if return_seg:
             # [V12] Auxiliary Segmentation Output using LaRE Map
-            # We use LaRE Map as the base for segmentation because it naturally contains 
-            # spatial reconstruction errors (the content-aware noise).
-            seg_logits = self.seg_head(map_input) # [B, 1, 32, 32]
+            seg_logits = self.seg_head(map_input).float() # [B, 1, 32, 32]
             
-            # Upsample to match typical Mask size (e.g. 512x512) or calculate loss at 32x32?
-            # Calculating loss at 32x32 is cheaper and sufficient for "Attention" guidance.
             return logits, seg_logits
             
         return logits

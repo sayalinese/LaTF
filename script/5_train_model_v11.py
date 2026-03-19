@@ -146,6 +146,7 @@ def train_one_epoch(model, loader, optimizer, scaler, criterion, device, epoch, 
     logger.info(f"Epoch {epoch} Loss: {avg_loss:.4f} Acc: {avg_acc:.4f}")
     writer.add_scalar('Train/Loss', avg_loss, epoch)
     writer.add_scalar('Train/Acc', avg_acc, epoch)
+    return avg_loss, avg_acc
 
 def evaluate(model, loader, criterion, device, epoch, writer):
     model.eval()
@@ -154,6 +155,10 @@ def evaluate(model, loader, criterion, device, epoch, writer):
     total_loss = 0
     correct = 0
     total = 0
+    
+    all_labels = []
+    all_probs = []
+    all_preds = []
     
     with torch.no_grad():
         for batch in loader:
@@ -180,23 +185,30 @@ def evaluate(model, loader, criterion, device, epoch, writer):
             logits = model(img_clip, img_highres, loss_maps, trufor_map=trufor)
             loss = criterion(logits, labels)
             
+            probs = torch.softmax(logits, dim=1)[:, 1] # Probability of class 1 (AI)
+            
             total_loss += loss.item()
             preds = torch.argmax(logits, dim=1)
             correct += (preds == labels).sum().item()
             total += labels.size(0)
             
+            all_labels.extend(labels.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            
     # 防止验证集为空的情况
     if len(loader) == 0:
         logger.warning(f"Validation loader is empty! Skipping validation for epoch {epoch}")
-        return 0.0
+        return 0.0, 0.0, [], [], []
     
     avg_loss = total_loss / len(loader)
     avg_acc = correct / total if total > 0 else 0.0
     
     logger.info(f"Val Epoch {epoch} Loss: {avg_loss:.4f} Acc: {avg_acc:.4f}")
-    writer.add_scalar('Val/Loss', avg_loss, epoch)
-    writer.add_scalar('Val/Acc', avg_acc, epoch)
-    return avg_acc
+    if writer:
+        writer.add_scalar('Val/Loss', avg_loss, epoch)
+        writer.add_scalar('Val/Acc', avg_acc, epoch)
+    return avg_loss, avg_acc, all_labels, all_probs, all_preds
 
 def main():
     parser = argparse.ArgumentParser(description='Train LaRE V11 Fusion Model')
@@ -284,10 +296,26 @@ def main():
     early_stop_patience = int(os.getenv('EARLY_STOP_PATIENCE', 6))
     no_improve_epochs = 0
     
+    # Track statistics
+    history = {
+        'epoch': [],
+        'train_loss': [],
+        'train_acc': [],
+        'val_loss': [],
+        'val_acc': []
+    }
+    
     for epoch in range(1, args.epochs + 1):
-        train_one_epoch(model, train_loader, optimizer, scaler, criterion, device, epoch, writer, args)
-        val_acc = evaluate(model, val_loader, criterion, device, epoch, writer)
+        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, scaler, criterion, device, epoch, writer, args)
+        val_loss, val_acc, val_labels, val_probs, val_preds = evaluate(model, val_loader, criterion, device, epoch, writer)
         scheduler.step()
+        
+        # Save history
+        history['epoch'].append(epoch)
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
         
         # Save Best
         if val_acc > best_acc:
@@ -314,6 +342,122 @@ def main():
         
     writer.close()
     logger.info("Training Complete.")
+    
+    # --- Generate Plots & History ---
+    try:
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from sklearn.metrics import confusion_matrix, roc_curve, auc, roc_auc_score
+        
+        # 1. Save History CSV
+        df_history = pd.DataFrame(history)
+        df_history.to_csv(out_dir / 'training_history.csv', index=False)
+        logger.info(f"Saved training history to {out_dir / 'training_history.csv'}")
+        
+        # 2. Plot Training Curves
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Loss curve
+        ax1.plot(df_history['epoch'], df_history['train_loss'], label='Train Loss')
+        ax1.plot(df_history['epoch'], df_history['val_loss'], label='Val Loss')
+        ax1.set_title('Loss Curve')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.legend()
+        
+        # Accuracy curve
+        ax2.plot(df_history['epoch'], df_history['train_acc'], label='Train Acc')
+        ax2.plot(df_history['epoch'], df_history['val_acc'], label='Val Acc')
+        ax2.set_title('Accuracy Curve')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Accuracy')
+        ax2.legend()
+        
+        plt.tight_layout()
+        plt.savefig(out_dir / 'training_curves.png')
+        plt.close()
+        logger.info(f"Saved curves to {out_dir / 'training_curves.png'}")
+        
+        # Load best model for final evaluation plots
+        best_ckpt = out_dir / 'best.pth'
+        if best_ckpt.exists():
+            checkpoint = torch.load(best_ckpt, map_location=device)
+            model.load_state_dict(checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint)
+            
+            logger.info("Running evaluation with best model for final plots...")
+            _, _, final_labels, final_probs, final_preds = evaluate(model, val_loader, criterion, device, 'Final', None)
+            
+            if len(final_labels) > 0:
+                # 3. Plot Confusion Matrix
+                cm = confusion_matrix(final_labels, final_preds)
+                plt.figure(figsize=(6, 5))
+                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                            xticklabels=['Real (0)', 'AI (1)'],
+                            yticklabels=['Real (0)', 'AI (1)'])
+                plt.title('Confusion Matrix')
+                plt.ylabel('True Label')
+                plt.xlabel('Predicted Label')
+                plt.tight_layout()
+                plt.savefig(out_dir / 'confusion_matrix.png')
+                plt.close()
+                logger.info(f"Saved Confusion Matrix to {out_dir / 'confusion_matrix.png'}")
+                
+                # 4. Plot ROC Curve
+                fpr, tpr, _ = roc_curve(final_labels, final_probs)
+                roc_auc = auc(fpr, tpr)
+                
+                plt.figure(figsize=(6, 5))
+                plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.4f})')
+                plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+                plt.xlim([0.0, 1.0])
+                plt.ylim([0.0, 1.05])
+                plt.xlabel('False Positive Rate')
+                plt.ylabel('True Positive Rate')
+                plt.title('Receiver Operating Characteristic (ROC)')
+                plt.legend(loc="lower right")
+                plt.tight_layout()
+                plt.savefig(out_dir / 'roc_curve.png')
+                plt.close()
+                logger.info(f"Saved ROC Curve to {out_dir / 'roc_curve.png'}")
+                
+                # 5. Bad Cases Visualisation
+                try:
+                    bad_cases_dir = out_dir / 'bad_cases'
+                    bad_cases_dir.mkdir(exist_ok=True)
+                    bad_cases_count = 0
+                    
+                    import cv2
+                    import numpy as np
+                    
+                    for i in range(len(final_labels)):
+                        if final_labels[i] == 0 and final_preds[i] == 1:
+                            # 假阳性 (False Positive): 把真图当成假图
+                            case_type = "FP_RealAsAI"
+                            prob = final_probs[i]
+                            # Since dataloader uses random batching/shuffling for simple iteration,
+                            # mapping index back to filename requires info.
+                            # Oh actually val_loader is shuffle=False, so index is deterministic!
+                            img_path = val_dataset.entries[i]['image']
+                            
+                            if bad_cases_count < 10:  # Select top 10 mistakes or first 10
+                                # read origin image
+                                orig_img = cv2.imread(img_path)
+                                if orig_img is not None:
+                                    orig_img = cv2.cvtColor(orig_img, cv2.COLOR_BGR2RGB)
+                                    plt.figure()
+                                    plt.imshow(orig_img)
+                                    plt.title(f"True: Real | Pred: AI (Score: {prob:.3f})\nPath: {Path(img_path).name}")
+                                    plt.axis('off')
+                                    plt.savefig(bad_cases_dir / f'bad_{bad_cases_count}_{case_type}_{Path(img_path).name}')
+                                    plt.close()
+                                    bad_cases_count += 1
+                                    
+                except Exception as e:
+                    logger.warning(f"Failed to generate bad cases: {e}")
+                
+    except Exception as e:
+        logger.warning(f"Error during plotting: {e}")
 
     # Post-training: run per-category evaluation and save CSV
     try:

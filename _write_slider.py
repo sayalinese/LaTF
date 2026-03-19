@@ -1,0 +1,148 @@
+# -*- coding: utf-8 -*-
+import codecs
+
+content = r"""<script setup lang="ts">
+import { ref } from 'vue'
+
+const props = defineProps<{
+  heatmapBase64?: string | null
+  originalSrc?: string | null
+}>()
+
+const sliderVal = ref(50)
+</script>
+
+<template>
+  <div class="heatmap-outer" v-if="heatmapBase64 && originalSrc">
+    <h4><i class="fa-solid fa-layer-group"></i> 分析对比</h4>
+    <p class="heatmap-desc">拖动滑块查看 AI 异常热力图。</p>
+
+    <!-- 居中弹性盒子，作为图片的边框容器 -->
+    <div class="slider-frame">
+      <!-- 动态大小包裹器 -->
+      <div class="comparison-container">
+
+        <!-- 底版原图，撑开对比容器的实际宽和高 -->
+        <img class="base-img" :src="originalSrc" alt="Original" />
+
+        <!-- 热力图覆盖层 -->
+        <div class="heatmap-overlay" :style="{ clipPath: 'inset(0 ' + (100 - sliderVal) + '% 0 0)' }">
+          <img class="heatmap-img" :src="'data:image/jpeg;base64,' + heatmapBase64" alt="Heatmap" />
+        </div>
+
+        <!-- 拖动手柄 -->
+        <input type="range" min="0" max="100" v-model="sliderVal" class="slider-input" />
+        <div class="slider-handle" :style="{ left: sliderVal + '%' }"></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.heatmap-outer {
+  width: 100%;
+}
+
+.heatmap-outer h4 {
+  margin: 0 0 4px 0;
+}
+
+.heatmap-desc {
+  margin: 0 0 12px 0;
+  font-size: 0.85rem;
+  color: var(--text-muted, #888);
+}
+
+/* 居中弹性盒子，作为图片的边框容器（上下居中、左右居中） */
+.slider-frame {
+  width: 100%;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--border-color, rgba(255,255,255,0.1));
+  border-radius: 12px;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+/* 容器的宽和高将被 base-img 撑开 */
+.comparison-container {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+/* 原图：负责把包裹器撑开成图原本真实的宽高 */
+.base-img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  width: auto;
+  height: auto;
+}
+
+/* 覆盖层：绝对定位并覆盖 */
+.heatmap-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* 强制热力图在内层贴满 */
+.heatmap-img {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  display: block;
+}
+
+.slider-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: ew-resize;
+  z-index: 10;
+  margin: 0;
+}
+
+.slider-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background-color: white;
+  z-index: 9;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.slider-handle::after {
+  content: '< >';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: white;
+  color: #333;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: bold;
+}
+</style>
+"""
+
+target = r"d:\三创\LaRE-main\web\vue\src\components\detection\HeatmapSlider.vue"
+with codecs.open(target, "w", "utf-8") as f:
+    f.write(content.lstrip("\n"))
+
+print("HeatmapSlider.vue rewritten OK")

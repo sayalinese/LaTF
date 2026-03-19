@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory, session as flask_session
 from flask_cors import CORS
 import os
 import sys
@@ -10,6 +10,8 @@ from io import BytesIO
 import base64
 from pathlib import Path
 from dotenv import load_dotenv
+import uuid as uuid_mod
+from werkzeug.utils import secure_filename
 
 # Load environment variables
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -21,17 +23,26 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False  # Support Chinese characters
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'lare-dev-secret-key-2026')
+
+# 上传文件配置
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'}
+
+def allowed_file(filename: str) -> bool:
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # Database configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/laft')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Import models and initialize db and migrate
-from models import db, migrate
+from models import db, migrate, User, DisputeSession, Message
 db.init_app(app)
 migrate.init_app(app, db)
 
-CORS(app)  # Allow Cross-Origin requests
+CORS(app, supports_credentials=True)  # Allow Cross-Origin requests with cookies
 
 # 导入重构后的模块 (位于 web/flask/flask_service 下)
 try:
@@ -248,6 +259,400 @@ def explain_logic():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+# --- 认证相关接口 ---
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+    nickname = data.get('nickname', username)
+
+    if not username or not password:
+        return jsonify({"success": False, "message": "用户名和密码不能为空"}), 400
+
+    existing_user = User.query.filter_by(id=username).first()
+    if existing_user:
+        return jsonify({"success": False, "message": "用户名已存在"}), 400
+
+    new_user = User(id=username, nickname=nickname, password=password, avatar=username[0].upper())
+    db.session.add(new_user)
+    db.session.commit()
+    
+    return jsonify({"success": True, "message": "注册成功"})
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+
+    user = User.query.filter_by(id=username, password=password).first()
+    if user:
+        flask_session['user_id'] = user.id
+        disputes_count = DisputeSession.query.filter((DisputeSession.buyer_id == user.id) | (DisputeSession.seller_id == user.id)).count()
+        history_count = disputes_count * 3 + 5 
+        
+        return jsonify({
+            "success": True, 
+            "message": "登录成功", 
+            "user": {
+                "id": user.id,
+                "username": user.id, 
+                "nickname": user.nickname, 
+                "avatar": user.avatar or user.nickname[0].upper(),
+                "historyCount": history_count,
+                "disputesCount": disputes_count,
+                "accuracy": "97.5%"
+            }
+        })
+    else:
+        return jsonify({"success": False, "message": "用户名或密码错误"}), 401
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    flask_session.pop('user_id', None)
+    return jsonify({"success": True, "message": "已退出登录"})
+
+@app.route('/me', methods=['GET'])
+def get_current_user():
+    user_id = flask_session.get('user_id')
+    if not user_id:
+        return jsonify({"success": False, "message": "未登录"}), 401
+    user = User.query.get(user_id)
+    if not user:
+        flask_session.pop('user_id', None)
+        return jsonify({"success": False, "message": "用户不存在"}), 401
+    disputes_count = DisputeSession.query.filter((DisputeSession.buyer_id == user.id) | (DisputeSession.seller_id == user.id)).count()
+    history_count = disputes_count * 3 + 5
+    return jsonify({
+        "success": True,
+        "user": {
+            "id": user.id,
+            "username": user.id,
+            "nickname": user.nickname,
+            "avatar": user.avatar or user.nickname[0].upper(),
+            "historyCount": history_count,
+            "disputesCount": disputes_count,
+            "accuracy": "97.5%"
+        }
+    })
+
+@app.route('/update_profile', methods=['POST'])
+def update_profile():
+    user_id = flask_session.get('user_id')
+    if not user_id:
+        return jsonify({"success": False, "message": "未登录"}), 401
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"success": False, "message": "用户不存在"}), 401
+
+    # 处理头像上传
+    if 'avatar' in request.files:
+        file = request.files['avatar']
+        if file.filename and allowed_file(file.filename):
+            ext = file.filename.rsplit('.', 1)[1].lower()
+            unique_name = f"avatar_{uuid_mod.uuid4().hex}.{ext}"
+            file.save(os.path.join(UPLOAD_DIR, unique_name))
+            user.avatar = f"/api/uploads/{unique_name}"
+
+    # 处理昵称更新
+    nickname = request.form.get('nickname')
+    if nickname and nickname.strip():
+        user.nickname = nickname.strip()
+
+    db.session.commit()
+    return jsonify({
+        "success": True,
+        "message": "资料更新成功",
+        "user": {
+            "nickname": user.nickname,
+            "avatar": user.avatar or user.nickname[0].upper()
+        }
+    })
+
+# --- 会话相关工具函数 ---
+def _session_to_dict(s):
+    last_msg = Message.query.filter_by(session_id=s.id).order_by(Message.created_at.desc()).first()
+    desc = "等待对方上传证据图片..."
+    if last_msg:
+        if last_msg.content_type == 'image':
+            desc = f"[{last_msg.sender_role}发了图片]"
+        else:
+            desc = last_msg.content[:15] + "..." if len(last_msg.content) > 15 else last_msg.content
+    return {
+        "id": str(s.id),
+        "title": s.topic_name,
+        "desc": desc,
+        "status": s.status,
+        "buyer_id": s.buyer_id or '',
+        "seller_id": s.seller_id or '',
+        "time": s.created_at.strftime('%H:%M') if s.created_at else ''
+    }
+
+def _check_session(session_id_str, user_id=None, owner_only=False):
+    """返回 (session, error_tuple)，error_tuple 为 None 表示成功。"""
+    import uuid as _uuid
+    try:
+        sid = _uuid.UUID(session_id_str)
+    except Exception:
+        return None, (jsonify({"success": False, "message": "无效的会话ID"}), 400)
+    s = DisputeSession.query.get(sid)
+    if not s:
+        return None, (jsonify({"success": False, "message": "会话不存在"}), 404)
+    if user_id:
+        if owner_only and s.buyer_id != user_id:
+            return None, (jsonify({"success": False, "message": "仅会话创建者可执行此操作"}), 403)
+        elif not owner_only and s.buyer_id != user_id and s.seller_id != user_id:
+            return None, (jsonify({"success": False, "message": "无权访问此会话"}), 403)
+    return s, None
+
+# --- 会话相关接口 ---
+@app.route('/sessions', methods=['GET'])
+def get_sessions():
+    current_user_id = flask_session.get('user_id')
+    if not current_user_id:
+        return jsonify({"success": True, "sessions": []})
+    sessions = DisputeSession.query.filter(
+        (DisputeSession.buyer_id == current_user_id) | (DisputeSession.seller_id == current_user_id)
+    ).order_by(DisputeSession.updated_at.desc()).all()
+    return jsonify({"success": True, "sessions": [_session_to_dict(s) for s in sessions]})
+
+@app.route('/sessions', methods=['POST'])
+def create_session():
+    current_user_id = flask_session.get('user_id')
+    if not current_user_id:
+        return jsonify({"success": False, "message": "请先登录"}), 401
+    data = request.json or {}
+    topic_name = (data.get('topic_name') or '未命名交易纠纷').strip() or '未命名交易纠纷'
+    s = DisputeSession(topic_name=topic_name, buyer_id=current_user_id, status='open')
+    db.session.add(s)
+    db.session.commit()
+    return jsonify({"success": True, "session": _session_to_dict(s)})
+
+@app.route('/sessions/<session_id>', methods=['PUT'])
+def update_session(session_id):
+    current_user_id = flask_session.get('user_id')
+    if not current_user_id:
+        return jsonify({"success": False, "message": "请先登录"}), 401
+    s, err = _check_session(session_id, current_user_id, owner_only=True)
+    if err: return err
+    data = request.json or {}
+    topic_name = (data.get('topic_name') or '').strip()
+    if topic_name:
+        s.topic_name = topic_name
+    db.session.commit()
+    return jsonify({"success": True, "title": s.topic_name})
+
+@app.route('/sessions/<session_id>', methods=['DELETE'])
+def delete_session(session_id):
+    current_user_id = flask_session.get('user_id')
+    if not current_user_id:
+        return jsonify({"success": False, "message": "请先登录"}), 401
+    s, err = _check_session(session_id, current_user_id, owner_only=True)
+    if err: return err
+    db.session.delete(s)
+    db.session.commit()
+    return jsonify({"success": True})
+
+@app.route('/sessions/<session_id>/join', methods=['POST'])
+def join_session(session_id):
+    current_user_id = flask_session.get('user_id')
+    if not current_user_id:
+        return jsonify({"success": False, "message": "请先登录后再加入会话"}), 401
+    import uuid as _uuid
+    try:
+        s = DisputeSession.query.get(_uuid.UUID(session_id))
+    except Exception:
+        return jsonify({"success": False, "message": "无效的邀请码"}), 400
+    if not s:
+        return jsonify({"success": False, "message": "会话不存在，请检查邀请码"}), 404
+    if s.buyer_id == current_user_id:
+        return jsonify({"success": False, "message": "你是该会话的创建者，无需加入"}), 400
+    if s.seller_id:
+        if s.seller_id != current_user_id:
+            return jsonify({"success": False, "message": "该会话对方席位已被占用"}), 400
+    else:
+        s.seller_id = current_user_id
+        db.session.commit()
+    return jsonify({"success": True, "session": _session_to_dict(s)})
+
+@app.route('/sessions/<session_id>/messages', methods=['GET'])
+def get_session_messages(session_id):
+    current_user_id = flask_session.get('user_id')
+    s, err = _check_session(session_id, current_user_id)
+    if err: return err
+
+    after_id = request.args.get('after')
+    query = Message.query.filter_by(session_id=session_id)
+    if after_id:
+        import uuid as _uuid
+        try:
+            after_msg = Message.query.get(_uuid.UUID(after_id))
+            if after_msg:
+                query = query.filter(Message.created_at > after_msg.created_at)
+        except Exception:
+            pass
+
+    msgs = query.order_by(Message.created_at.asc()).all()
+    res = []
+    for m in msgs:
+        sender = User.query.get(m.sender_id)
+        sender_name = sender.nickname if sender else m.sender_id
+        sender_avatar = (sender.avatar or sender_name[0].upper()) if sender else m.sender_id[0].upper()
+        res.append({
+            "id": str(m.id),
+            "role": m.sender_role,
+            "sender_id": m.sender_id,
+            "name": sender_name,
+            "avatar": sender_avatar,
+            "content": m.content,
+            "type": m.content_type,
+            "hasBeenDetected": True if m.ai_detect_data else False
+        })
+    return jsonify({"success": True, "messages": res})
+
+# --- 静态上传文件服务 ---
+@app.route('/uploads/<path:filename>', methods=['GET'])
+def serve_upload(filename):
+    return send_from_directory(UPLOAD_DIR, filename)
+
+# --- 发送消息（文本 / 图片） ---
+@app.route('/sessions/<session_id>/messages', methods=['POST'])
+def send_message(session_id):
+    current_user_id = flask_session.get('user_id')
+    if not current_user_id:
+        return jsonify({"success": False, "message": "请先登录"}), 401
+    s, err = _check_session(session_id, current_user_id)
+    if err: return err
+
+    # 从会话成员关系自动推导角色，防止客户端伪造
+    if s.buyer_id == current_user_id:
+        sender_role = 'buyer'
+    elif s.seller_id == current_user_id:
+        sender_role = 'seller'
+    else:
+        return jsonify({"success": False, "message": "你不是此会话成员"}), 403
+
+    content_type = request.form.get('content_type', 'text')
+    text_content = request.form.get('content', '')
+
+    import uuid
+    sid = uuid.UUID(session_id)
+
+    if content_type == 'image':
+        if 'file' not in request.files:
+            return jsonify({"success": False, "message": "未上传图片文件"}), 400
+        file = request.files['file']
+        if file.filename == '' or not allowed_file(file.filename):
+            return jsonify({"success": False, "message": "不支持的文件格式"}), 400
+        ext = file.filename.rsplit('.', 1)[1].lower()
+        unique_name = f"{uuid_mod.uuid4().hex}.{ext}"
+        file.save(os.path.join(UPLOAD_DIR, unique_name))
+        saved_content = f"/api/uploads/{unique_name}"
+    else:
+        if not text_content.strip():
+            return jsonify({"success": False, "message": "消息内容不能为空"}), 400
+        saved_content = text_content
+
+    msg = Message(
+        session_id=sid,
+        sender_id=current_user_id,
+        sender_role=sender_role,
+        content_type=content_type,
+        content=saved_content
+    )
+    db.session.add(msg)
+    # 更新 updated_at 使会话排在列表前面
+    s.updated_at = __import__('datetime').datetime.utcnow()
+    db.session.commit()
+
+    sender = User.query.get(current_user_id)
+    sender_name = sender.nickname if sender else current_user_id
+    sender_avatar = (sender.avatar or sender_name[0].upper()) if sender else current_user_id[0].upper()
+
+    return jsonify({
+        "success": True,
+        "message": {
+            "id": str(msg.id),
+            "role": msg.sender_role,
+            "sender_id": current_user_id,
+            "name": sender_name,
+            "avatar": sender_avatar,
+            "content": msg.content,
+            "type": msg.content_type,
+            "hasBeenDetected": False
+        }
+    })
+
+# --- AI 鉴定：对会话中的图片消息执行 LaFT 检测 ---
+@app.route('/detect_message', methods=['POST'])
+def detect_message():
+    data = request.json or {}
+    message_id = data.get('message_id')
+    use_vl = data.get('use_vl', False)  # 是否使用 Qwen-VL 生成报告
+
+    if not message_id:
+        return jsonify({"success": False, "message": "缺少 message_id"}), 400
+
+    import uuid as _uuid
+    msg = Message.query.get(_uuid.UUID(message_id))
+    if not msg:
+        return jsonify({"success": False, "message": "消息不存在"}), 404
+    if msg.content_type != 'image':
+        return jsonify({"success": False, "message": "该消息不是图片"}), 400
+
+    # 解析图片路径 - 本地文件
+    img_url = msg.content  # e.g. "/api/uploads/xxx.jpg"
+    filename = img_url.split('/uploads/')[-1] if '/uploads/' in img_url else None
+    if not filename:
+        return jsonify({"success": False, "message": "无法解析图片路径"}), 400
+
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.isfile(filepath):
+        return jsonify({"success": False, "message": "图片文件不存在"}), 404
+
+    try:
+        img = Image.open(filepath)
+        img = ImageOps.exif_transpose(img)
+        img = img.convert('RGB')
+
+        # LaFT 检测
+        laft_result = LAFT_MANAGER.predict(img)
+
+        # 组装检测数据
+        detect_data = {
+            "class_name": laft_result.get("class_name", "Unknown"),
+            "confidence": round(laft_result.get("confidence", 0), 4),
+            "probabilities": laft_result.get("probabilities", {}),
+            "heatmap": laft_result.get("heatmap"),  # base64
+        }
+
+        # 可选：Qwen-VL 解释报告
+        vl_report = None
+        if use_vl:
+            try:
+                buffered = BytesIO()
+                img.save(buffered, format="JPEG")
+                b64_img = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                is_fake = detect_data["class_name"] != "Real"
+                vl_result = explain_logic_with_qwen(b64_img, is_fake)
+                vl_report = vl_result.get("report", "")
+            except Exception as vl_err:
+                vl_report = f"VL 分析不可用: {str(vl_err)}"
+
+        detect_data["vl_report"] = vl_report
+
+        # 存入数据库
+        msg.ai_detect_data = detect_data
+        db.session.commit()
+
+        return jsonify({"success": True, "detect": detect_data})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": f"检测失败: {str(e)}"}), 500
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, threaded=False)

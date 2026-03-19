@@ -10,76 +10,110 @@ const sliderVal = ref(50)
 </script>
 
 <template>
-  <div class="heatmap-wrapper" v-if="heatmapBase64 && originalSrc">
+  <div class="heatmap-outer" v-if="heatmapBase64 && originalSrc">
     <h4><i class="fa-solid fa-layer-group"></i> 分析对比</h4>
     <p class="heatmap-desc">拖动滑块查看 AI 异常热力图。</p>
-    
-    <div class="comparison-container" :style="{ '--slider-pos': sliderVal + '%' }">
-      <!-- Bottom Image (Heatmap) -->
-      <img class="comparison-image" :src="`data:image/jpeg;base64,${heatmapBase64}`" alt="Heatmap">
 
-      
-      <!-- Top Image (Original) -->
-      <div class="img-overlay" :style="{ clipPath: `inset(0 ${100 - sliderVal}% 0 0)` }">
-        <img :src="originalSrc" alt="Original">
+    <!-- 居中弹性盒子，作为图片的边框容器 -->
+    <div class="slider-frame">
+      <!-- 动态大小包裹器 -->
+      <div class="comparison-container">
 
+        <!-- 底版原图，撑开对比容器的实际宽和高 -->
+        <img class="base-img" :src="originalSrc" alt="Original" />
+
+        <!-- 热力图覆盖层 -->
+        <div class="heatmap-overlay" :style="{ clipPath: 'inset(0 ' + (100 - sliderVal) + '% 0 0)' }">
+          <img class="heatmap-img" :src="'data:image/jpeg;base64,' + heatmapBase64" alt="Heatmap" />
+        </div>
+
+        <!-- 拖动手柄 -->
+        <input type="range" min="0" max="100" v-model="sliderVal" class="slider-input" />
+        <div class="slider-handle" :style="{ left: sliderVal + '%' }"></div>
       </div>
-      
-      <!-- Handle -->
-      <input type="range" min="0" max="100" v-model="sliderVal" class="slider-input" />
-      <div class="slider-handle" :style="{ left: sliderVal + '%' }"></div>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* Scoped overrides to make the slider work smoothly in Vue */
-.comparison-container {
-  position: relative;
+.heatmap-outer {
   width: 100%;
-  aspect-ratio: auto;
-  border-radius: 8px;
-  background-color: transparent;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
   align-items: center;
 }
 
-.comparison-image {
-  width: 100%;
-  height: auto;
-  max-height: 450px;
-  object-fit: contain;
-  display: block;
+.heatmap-outer h4 {
+  align-self: flex-start;
+  margin: 0 0 4px 0;
 }
 
-.img-overlay {
+.heatmap-desc {
+  align-self: flex-start;
+  margin: 0 0 12px 0;
+  font-size: 0.85rem;
+  color: var(--text-muted, #888);
+}
+
+/* 外层边框盒子：跟随图片大小收缩，居中由父级 heatmap-outer 控制 */
+.slider-frame {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border-radius: 14px;
+  border: 1px solid var(--border-color, rgba(255,255,255,0.12));
+  background: rgba(0, 0, 0, 0.04);
+  max-width: 100%;
+}
+
+/* 内层边框盒子：紧贴图片，宽高由 base-img 撑开 */
+.comparison-container {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-color, rgba(255,255,255,0.15));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+/* 原图：负责把包裹器撑开成图原本真实的宽高 */
+.base-img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  width: auto;
+  height: auto;
+}
+
+/* 覆盖层：绝对定位并覆盖 */
+.heatmap-overlay {
   position: absolute;
   top: 0;
   left: 0;
   width: 100%;
   height: 100%;
-  display: flex;
-  justify-content: center;
-  align-items: center;
+  pointer-events: none;
 }
 
-.img-overlay img {
+/* 强制热力图在内层贴满 */
+.heatmap-img {
   width: 100%;
   height: 100%;
-  max-height: 450px;
-  object-fit: contain;
+  object-fit: fill;
+  display: block;
 }
 
 .slider-input {
   position: absolute;
-  top: 0;
-  left: 0;
+  inset: 0;
   width: 100%;
   height: 100%;
   opacity: 0;
   cursor: ew-resize;
   z-index: 10;
+  margin: 0;
 }
 
 .slider-handle {

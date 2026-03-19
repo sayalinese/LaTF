@@ -50,7 +50,7 @@ class LaFTManager:
         
         if self.lare_extractor is None:
             try:
-                self.lare_extractor = LareExtractor(device=self.device, model_type=model_type, dtype=torch.float32)
+                self.lare_extractor = LareExtractor(device=self.device, model_type=model_type, dtype=torch.float16)
             except Exception as ex:
                 print(f"[LaRE] Failed to load: {ex}")
                 self.lare_extractor = None
@@ -213,10 +213,14 @@ class LaFTManager:
                 "cascade_triggered": False
             }
 
-        if self.cascade_inference is not None:
-            return self._predict_cascade(img)
-        else:
-            return self._predict_standard(img)
+        try:
+            if self.cascade_inference is not None:
+                return self._predict_cascade(img)
+            else:
+                return self._predict_standard(img)
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _predict_cascade(self, img: Image.Image):
         trufor_vis_map = None

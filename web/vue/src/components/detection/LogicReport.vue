@@ -62,8 +62,8 @@ const toggleThink = () => {
 <style scoped>
 .logic-report-container {
     margin-top: 0;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    background: var(--border-color-light);
+    border: 1px solid var(--border-color-light);
     border-radius: 12px;
     overflow: hidden;
     backdrop-filter: blur(10px);
@@ -79,29 +79,29 @@ const toggleThink = () => {
 }
 
 .report-header {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--border-color-light);
     padding: 16px 20px;
     font-weight: 700;
-    color: #e2e8f0;
+    color: var(--text-main);
     font-size: 1.05em;
     display: flex;
     align-items: center;
     gap: 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid var(--border-color-light);
 }
 
 .report-header i {
-    color: #60a5fa;
+    color: var(--primary-color);
     font-size: 1.2em;
 }
 
 .think-section {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid var(--border-color-light);
 }
 
 .think-toggle {
     padding: 12px 20px;
-    color: #94a3b8;
+    color: var(--text-muted);
     font-size: 0.9em;
     font-weight: 500;
     cursor: pointer;
@@ -114,14 +114,14 @@ const toggleThink = () => {
 }
 
 .think-toggle:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--border-color-light);
     color: #cbd5e1;
 }
 
 .think-content {
     padding: 16px 20px;
     font-size: 0.85em;
-    color: #94a3b8;
+    color: var(--text-muted);
     white-space: pre-wrap;
     word-break: break-word;
     background: rgba(0, 0, 0, 0.2);
@@ -148,11 +148,11 @@ const toggleThink = () => {
 :deep(.markdown-body h3) {
     font-size: 1.15em;
     font-weight: 700;
-    color: #f8fafc;
+    color: var(--text-main);
     margin-top: 24px;
     margin-bottom: 12px;
     padding-bottom: 8px;
-    border-bottom: 2px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 2px solid var(--border-color-light);
     display: flex;
     align-items: center;
 }

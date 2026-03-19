@@ -1,4 +1,5 @@
-import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router';
+import { createRouter, createWebHistory } from 'vue-router';
+import type { RouteRecordRaw } from 'vue-router';
 import DetectionView from '../views/DetectionView.vue';
 import SessionDetectionView from '../views/SessionDetectionView.vue';
 import PluginTestView from '../views/PluginTestView.vue';

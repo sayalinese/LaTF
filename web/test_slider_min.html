@@ -1,0 +1,34 @@
+<html>
+<head><style>
+.heatmap-wrapper { width: 100%; display: flex; flex-direction: column; align-items: center; background: #eee; }
+.comparison-container {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  background-color: transparent;
+  line-height: 0;
+}
+.base-img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  width: auto;
+  height: auto;
+}
+.heatmap-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+.heatmap-img { width: 100%; height: 100%; object-fit: fill; display: block; opacity: 0.5; }
+</style></head>
+<body>
+<div class="heatmap-wrapper">
+  <div class="comparison-container">
+      <!-- A 10x20 image -->
+      <img class="base-img" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIyMCI+PHJlY3Qgd2lkdGg9IjEwIiBoZWlnaHQ9IjIwIiBmaWxsPSJyZWQiLz48L3N2Zz4=" alt="Original">
+      <div class="img-overlay heatmap-overlay">
+        <!-- A 20x20 image -->
+        <img class="abs-img heatmap-img" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCI+PHJlY3Qgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSJibHVlIi8+PC9zdmc+" alt="Heatmap">
+      </div>
+  </div>
+</div>
+</body></html>

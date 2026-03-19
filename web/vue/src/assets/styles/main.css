@@ -6,9 +6,25 @@
     --text-main: #f8fafc;
     --text-muted: #94a3b8;
     --border-color: rgba(148, 163, 184, 0.1);
+    --border-color-light: rgba(255, 255, 255, 0.05);
+    --panel-bg: rgba(15, 23, 42, 0.9);
     --real-color: #10b981;
     --fake-color: #ef4444;
     --glass-blur: blur(20px);
+}
+
+:root[data-theme="light"] {
+    --primary-color: #4f46e5;
+    --primary-hover: #4338ca;
+    --bg-gradient: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+    --card-bg: rgba(255, 255, 255, 0.7);
+    --text-main: #1e293b;
+    --text-muted: #475569;
+    --border-color: rgba(0, 0, 0, 0.1);
+    --border-color-light: rgba(0, 0, 0, 0.05);
+    --panel-bg: rgba(255, 255, 255, 0.9);
+    --real-color: #059669;
+    --fake-color: #dc2626;
 }
 
 * {
@@ -20,12 +36,16 @@
 
 body {
     background: var(--bg-gradient);
+    background-attachment: fixed;
     min-height: 100vh;
     color: var(--text-main);
-    display: flex;
-    align-items: center;
-    justify-content: center;
     overflow-x: hidden;
+}
+
+#app {
+    min-height: 100vh;
+    background: var(--bg-gradient);
+    background-attachment: fixed;
 }
 
 .model-info-badge {
@@ -38,17 +58,17 @@ body {
     gap: 10px;
     padding: 10px 12px;
     border-radius: 14px;
-    background: rgba(15, 23, 42, 0.65);
-    border: 1px solid rgba(148, 163, 184, 0.18);
+    background: var(--panel-bg);
+    border: 1px solid var(--border-color);
     backdrop-filter: blur(14px);
-    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
     color: var(--text-main);
     font-size: 0.85rem;
     max-width: min(520px, calc(100vw - 32px));
 }
 
 .model-info-badge i {
-    color: rgba(148, 163, 184, 0.9);
+    color: var(--text-muted);
 }
 
 .model-info-text {
@@ -59,9 +79,9 @@ body {
 }
 
 .model-info-btn {
-    border: 1px solid rgba(148, 163, 184, 0.18);
-    background: rgba(255, 255, 255, 0.03);
-    color: rgba(226, 232, 240, 0.95);
+    border: 1px solid var(--border-color-light);
+    background: var(--border-color-light);
+    color: var(--text-main);
     width: 34px;
     height: 28px;
     border-radius: 10px;

@@ -11,6 +11,7 @@ class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.String(50), primary_key=True)
     nickname = db.Column(db.String(50), nullable=False)
+    password = db.Column(db.String(255), nullable=False, default='') # 添加密码字段
     avatar = db.Column(db.String(255))
 
 class DisputeSession(db.Model):
