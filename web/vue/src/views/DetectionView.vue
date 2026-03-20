@@ -18,6 +18,7 @@ const showVlmPanel = ref(false);
 const isGeneratingLogic = ref(false);
 const logicReportResult = ref<string | null>(null);
 const logicErrorMsg = ref<string | null>(null);
+const vlmSectionOpen = ref(false);
 
 // Config Status
 const sdkConfig = ref<ConfigResponse | null>(null);
@@ -211,11 +212,16 @@ const handleExplainLogic = async () => {
                   </div>
                   
                   <div class="vlm-trigger-block">
-                    <div class="panel-subtitle">深度物理逻辑鉴别</div>
-                    <p class="vlm-desc">启用多模态大模型(Qwen-VL)结合特征热力图进行深度物理规律层面的逻辑诊断。此过程可能需要几十秒时间。</p>
-                    <button class="vlm-btn" @click="handleExplainLogic" :disabled="isGeneratingLogic" v-if="!showVlmPanel">
-                      <i class="fa-solid fa-microscope"></i> 启动深度多模态诊断
-                    </button>
+                    <div class="panel-subtitle vlm-section-toggle" @click="vlmSectionOpen = !vlmSectionOpen">
+                      深度物理逻辑鉴别
+                      <i class="fa-solid" :class="vlmSectionOpen ? 'fa-chevron-up' : 'fa-chevron-down'" style="margin-left:auto;font-size:0.8rem;color:var(--text-muted)"></i>
+                    </div>
+                    <div v-show="vlmSectionOpen" class="vlm-section-body">
+                      <p class="vlm-desc">启用多模态大模型(Qwen-VL)结合特征热力图进行深度物理规律层面的逻辑诊断。此过程可能需要几十秒时间。</p>
+                      <button class="vlm-btn" @click="handleExplainLogic" :disabled="isGeneratingLogic" v-if="!showVlmPanel">
+                        <i class="fa-solid fa-microscope"></i> 启动深度多模态诊断
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -455,6 +461,15 @@ const handleExplainLogic = async () => {
   border: 1px dashed rgba(139, 92, 246, 0.25);
   flex: 1;
 }
+.vlm-section-toggle {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  user-select: none;
+  margin-bottom: 0;
+}
+.vlm-section-toggle:hover { color: var(--primary-color); }
+.vlm-section-body { margin-top: 14px; }
 
 .vlm-desc {
   font-size: 0.85rem;

@@ -668,4 +668,25 @@ const sendMessage = async () => {
   border-top: 1px solid rgba(255,255,255,0.1);
   margin: 8px 0;
 }
+
+/* ── 亮色主题适配 ──────────────────────────── */
+[data-theme="light"] .assistant-panel {
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.06) inset;
+}
+[data-theme="light"] .header-sub { color: #475569; }
+[data-theme="light"] .welcome-msg { color: #475569; }
+[data-theme="light"] .welcome-msg p { color: #1e293b; }
+[data-theme="light"] .welcome-sub { color: #64748b !important; }
+[data-theme="light"] .quick-btn { color: #4338ca; }
+[data-theme="light"] .chat-msg.assistant .msg-bubble { color: #1e293b; }
+[data-theme="light"] .md-bubble h3 { color: #4338ca; }
+[data-theme="light"] .md-bubble h4 { color: #475569; }
+[data-theme="light"] .md-bubble em { color: #4338ca; }
+[data-theme="light"] .md-bubble code { background: rgba(79,70,229,0.08); color: #4338ca; }
+[data-theme="light"] .md-bubble pre { background: rgba(0,0,0,0.05); border-color: rgba(79,70,229,0.15); }
+[data-theme="light"] .md-bubble pre code { color: #1e293b; }
+[data-theme="light"] .md-bubble blockquote { color: #64748b; border-left-color: rgba(79,70,229,0.4); }
+[data-theme="light"] .md-bubble hr { border-top-color: rgba(0,0,0,0.1); }
+[data-theme="light"] .assistant-input input { color: #1e293b; }
+[data-theme="light"] .assistant-input input::placeholder { color: #94a3b8; }
 </style>

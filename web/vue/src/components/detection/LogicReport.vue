@@ -135,7 +135,7 @@ const toggleThink = () => {
 /* 现代优雅的 Markdown 渲染样式 */
 .report-content {
     padding: 24px 28px;
-    color: #cbd5e1;
+    color: var(--text-main, #cbd5e1);
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     line-height: 1.7;
     font-size: 0.95rem;
@@ -175,7 +175,7 @@ const toggleThink = () => {
 :deep(.markdown-body p) {
     margin-bottom: 16px;
     letter-spacing: 0.2px;
-    color: #cbd5e1;
+    color: var(--text-main, #cbd5e1);
 }
 
 /* 重点优化带 - 的无序列表 */
@@ -190,7 +190,7 @@ const toggleThink = () => {
     position: relative;
     padding-left: 24px;
     margin-bottom: 10px;
-    color: #cbd5e1;
+    color: var(--text-main, #cbd5e1);
 }
 
 /* 自定义列表前面的漂亮圆角/图标标记 */
@@ -212,7 +212,7 @@ const toggleThink = () => {
 
 /* 加粗文字样式优化 */
 :deep(.markdown-body strong) {
-    color: #f1f5f9;
+    color: var(--text-main, #f1f5f9);
     font-weight: 600;
     background: rgba(96, 165, 250, 0.15);
     padding: 0 4px;

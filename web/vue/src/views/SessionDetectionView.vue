@@ -4,6 +4,14 @@ import { useRouter } from 'vue-router';
 import { fetchSessions, fetchSessionMessages, sendTextMessage, sendImageMessage, detectMessage, explainLogicStream, createSession, updateSession, deleteSession, joinSession } from '../api';
 import { useUserStore } from '../stores/user';
 import FloatingAssistant from '../components/session/FloatingAssistant.vue';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
+
+marked.setOptions({ breaks: true, gfm: true });
+const renderMd = (text: string): string => {
+  try { return DOMPurify.sanitize(marked.parse(text) as string); }
+  catch { return text; }
+};
 
 const { state: userState } = useUserStore();
 const router = useRouter();
@@ -612,13 +620,14 @@ const handleImageUpload = async (event: Event) => {
                   <div v-if="vlReport || vlStreaming" class="logic-report">
                     <div class="report-block vl-block">
                       <span class="report-tag visual">Qwen-VL</span>
-                      <p class="vl-text">{{ vlReport }}<span v-if="vlStreaming" class="cursor-blink">|</span></p>
+                      <div class="vl-text markdown-body" v-html="renderMd(vlReport)"></div>
+                      <span v-if="vlStreaming" class="cursor-blink">|</span>
                     </div>
                   </div>
                   <div v-else-if="detectResult.vl_report" class="logic-report">
                     <div class="report-block vl-block">
                       <span class="report-tag visual">Qwen-VL</span>
-                      <p class="vl-text">{{ detectResult.vl_report }}</p>
+                      <div class="vl-text markdown-body" v-html="renderMd(detectResult.vl_report)"></div>
                     </div>
                   </div>
                   <div v-else class="vl-placeholder">
@@ -1247,7 +1256,11 @@ const handleImageUpload = async (event: Event) => {
 }
 .report-tag.context { background: linear-gradient(135deg, #3b82f6, #2563eb); }
 .report-tag.visual { background: linear-gradient(135deg, #8b5cf6, var(--primary-color)); }
-.report-block p { margin: 8px 0 0; font-size: 0.9rem; line-height: 1.6; color: #cbd5e1; }
+.report-block p { margin: 8px 0 0; font-size: 0.9rem; line-height: 1.6; color: var(--text-main); }
+.vl-text.markdown-body { color: var(--text-main); }
+.vl-text.markdown-body p, .vl-text.markdown-body li { color: var(--text-main); margin-bottom: 8px; }
+.vl-text.markdown-body strong { color: var(--text-main); font-weight: 600; }
+.vl-text.markdown-body h1, .vl-text.markdown-body h2, .vl-text.markdown-body h3 { color: var(--text-main); margin: 12px 0 6px; }
 
 /* VL 按钮 & 占位 */
 .vl-trigger-btn {
