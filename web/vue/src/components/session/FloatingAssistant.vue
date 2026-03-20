@@ -42,8 +42,13 @@ const disabled = computed(() => !props.sessionId);
 
 // ── 拖拽逻辑 ──────────────────────────────────
 const FAB_SIZE = 56;
-const PANEL_W = 380;
-const PANEL_H = 520;
+
+const panelW = ref(380);
+const panelH = ref(520);
+const pinnedLeft = ref(0);
+const pinnedTop = ref(0);
+const isResizing = ref(false);
+const resizeStart = ref({ mx: 0, my: 0, w: 0, h: 0 });
 
 const pos = ref({ x: 0, y: 0 });
 const isDragging = ref(false);
@@ -62,15 +67,20 @@ const fabStyle = computed(() => ({
   cursor: isDragging.value ? 'grabbing' : 'grab',
 }));
 
-const panelStyle = computed(() => {
-  const margin = 12;
-  let top = pos.value.y - PANEL_H - margin;
-  if (top < margin) top = pos.value.y + FAB_SIZE + margin;
-  let left = pos.value.x + FAB_SIZE - PANEL_W;
-  left = Math.max(margin, Math.min(window.innerWidth - PANEL_W - margin, left));
-  top  = Math.max(margin, Math.min(window.innerHeight - PANEL_H - margin, top));
-  return { position: 'fixed' as const, left: left + 'px', top: top + 'px' };
-});
+const panelStyle = computed(() => ({
+  position: 'fixed' as const,
+  left: pinnedLeft.value + 'px',
+  top: pinnedTop.value + 'px',
+  width: panelW.value + 'px',
+  height: panelH.value + 'px',
+}));
+
+const onResizeGripDown = (e: MouseEvent) => {
+  isResizing.value = true;
+  resizeStart.value = { mx: e.clientX, my: e.clientY, w: panelW.value, h: panelH.value };
+  e.stopPropagation();
+  e.preventDefault();
+};
 
 // 鼠标拖拽
 const onDragStart = (e: MouseEvent) => {
@@ -81,6 +91,13 @@ const onDragStart = (e: MouseEvent) => {
 };
 
 const onMouseMove = (e: MouseEvent) => {
+  if (isResizing.value) {
+    const dx = e.clientX - resizeStart.value.mx;
+    const dy = e.clientY - resizeStart.value.my;
+    panelW.value = Math.max(280, Math.min(700, resizeStart.value.w + dx));
+    panelH.value = Math.max(360, Math.min(window.innerHeight - 40, resizeStart.value.h + dy));
+    return;
+  }
   if (!isDragging.value) return;
   const dx = e.clientX - dragStart.value.mx;
   const dy = e.clientY - dragStart.value.my;
@@ -89,6 +106,7 @@ const onMouseMove = (e: MouseEvent) => {
 };
 
 const onMouseUp = () => {
+  if (isResizing.value) { isResizing.value = false; return; }
   if (!isDragging.value) return;
   isDragging.value = false;
   if (!hasDragged.value) togglePanel();
@@ -139,8 +157,20 @@ const scrollToBottom = async () => {
   if (chatListEl.value) chatListEl.value.scrollTop = chatListEl.value.scrollHeight;
 };
 
+const computeAndPinPanelPos = () => {
+  const margin = 12;
+  let top = pos.value.y - panelH.value - margin;
+  if (top < margin) top = pos.value.y + FAB_SIZE + margin;
+  let left = pos.value.x + FAB_SIZE - panelW.value;
+  left = Math.max(margin, Math.min(window.innerWidth - panelW.value - margin, left));
+  top  = Math.max(margin, Math.min(window.innerHeight - panelH.value - margin, top));
+  pinnedLeft.value = left;
+  pinnedTop.value = top;
+};
+
 const togglePanel = () => {
   if (disabled.value) return;
+  if (!isOpen.value) computeAndPinPanelPos();
   isOpen.value = !isOpen.value;
   if (isOpen.value) scrollToBottom();
 };
@@ -299,6 +329,8 @@ const sendMessage = async () => {
             <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px" class="spin-anim"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
           </button>
         </div>
+        <!-- 拉伸手柄 -->
+        <div class="resize-grip" @mousedown.stop="onResizeGripDown"></div>
       </div>
     </transition>
   </teleport>
@@ -352,8 +384,8 @@ const sendMessage = async () => {
 /* ── 面板 ─────────────────────────────────────── */
 .assistant-panel {
   position: fixed;
-  width: 380px;
-  height: 520px;
+  min-width: 280px;
+  min-height: 360px;
   background: var(--panel-bg, #0f172a);
   border: 1px solid var(--border-color-light, rgba(255,255,255,0.08));
   border-radius: 20px;
@@ -362,6 +394,21 @@ const sendMessage = async () => {
   flex-direction: column;
   overflow: hidden;
   z-index: 9998;
+}
+.resize-grip {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 20px;
+  height: 20px;
+  cursor: se-resize;
+  border-bottom-right-radius: 20px;
+  background: linear-gradient(135deg, transparent 45%, rgba(139, 92, 246, 0.3) 45%);
+  transition: background 0.2s;
+  z-index: 1;
+}
+.resize-grip:hover {
+  background: linear-gradient(135deg, transparent 45%, rgba(139, 92, 246, 0.65) 45%);
 }
 
 .assistant-header {

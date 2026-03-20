@@ -28,7 +28,7 @@ watchEffect(() => {
   <nav class="top-navbar">
     <div class="nav-content">
       <div class="nav-brand">
-        <i class="fa-solid fa-shapes"></i> LaRE System
+        <i class="fa-solid fa-shapes"></i> LaFT System
       </div>
       <ul class="nav-links">
         <li v-for="item in navItems" :key="item.path">

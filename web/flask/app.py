@@ -47,7 +47,12 @@ from models import db, migrate, User, DisputeSession, Message
 db.init_app(app)
 migrate.init_app(app, db)
 
-CORS(app, supports_credentials=True, origins=['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173'])  # Flask-CORS 6.x 必须指定 origins，否则 credentials 会被浏览器拒绝
+CORS(app, supports_credentials=True, origins=[
+    'http://localhost:3000', 'http://127.0.0.1:3000',
+    'http://localhost:5173', 'http://127.0.0.1:5173',
+    r'https://.*\.ngrok-free\.app',   # ngrok 免费域名
+    r'https://.*\.ngrok\.io',         # ngrok 旧域名
+])  # Flask-CORS 6.x 必须指定 origins，否则 credentials 会被浏览器拒绝
 
 # 导入重构后的模块 (位于 web/flask/flask_service 下)
 try:
@@ -79,6 +84,10 @@ with app.app_context():
         print(f"Error loading model: {e}")
         import traceback
         traceback.print_exc()
+
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({"name": "LaRE API", "status": "running", "docs": "/health"})
 
 @app.route('/health', methods=['GET'])
 def health_check():

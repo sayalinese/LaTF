@@ -24,6 +24,7 @@ const isJudging = ref(false);
 const inputText = ref('');
 const fileInput = ref<HTMLInputElement | null>(null);
 const messageListEl = ref<HTMLElement | null>(null);
+const sidebarCollapsed = ref(false);
 
 // 会话管理 UI
 const showAddSession = ref(false);
@@ -321,22 +322,29 @@ const startVlStream = async () => {
   vlStreaming.value = true;
 
   try {
-    // 需要把图片转 base64 发给 VL
     const imgUrl = msg.content;
-    const response = await fetch(imgUrl);
+    const response = await fetch(imgUrl, { credentials: 'include' });
+    if (!response.ok) throw new Error(`图片请求失败: ${response.status}`);
     const blob = await response.blob();
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      const base64 = (reader.result as string).split(',')[1];
-      await explainLogicStream(base64, isFake.value, (chunk: string) => {
-        vlReport.value += chunk;
-      });
-      vlStreaming.value = false;
-    };
-    reader.readAsDataURL(blob);
-  } catch (e) {
+
+    // 将 FileReader 包装为 Promise，确保错误可被捕获
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const result = reader.result as string;
+        resolve(result.split(',')[1]);
+      };
+      reader.onerror = () => reject(new Error('图片读取失败'));
+      reader.readAsDataURL(blob);
+    });
+
+    await explainLogicStream(base64, isFake.value, (chunk: string) => {
+      vlReport.value += chunk;
+    });
+  } catch (e: any) {
     console.error("VL流式分析失败:", e);
-    vlReport.value += '\n[分析中断]';
+    vlReport.value += `\n[分析中断: ${e.message || '未知错误'}]`;
+  } finally {
     vlStreaming.value = false;
   }
 };
@@ -382,10 +390,13 @@ const handleImageUpload = async (event: Event) => {
     <div class="chat-container">
       
       <!-- 左侧：纠纷会话列表 -->
-      <div class="sidebar">
+      <div :class="['sidebar', { collapsed: sidebarCollapsed }]">
         <div class="sidebar-header">
           <h3><i class="fa-solid fa-scale-balanced" style="margin-right: 8px;"></i>纠纷法庭中心</h3>
           <div class="header-btns">
+            <button class="header-icon-btn" @click="sidebarCollapsed = true" title="收起列表">
+              <i class="fa-solid fa-chevron-left"></i>
+            </button>
             <button class="header-icon-btn" @click.stop="handleJoinBtnClick" title="加入纠纷">
               <i class="fa-solid fa-link"></i>
             </button>
@@ -434,6 +445,13 @@ const handleImageUpload = async (event: Event) => {
           </li>
         </ul>
       </div>
+
+      <!-- 侧边栏展开按钮 -->
+      <Transition name="sidebar-expand-fade">
+        <button v-if="sidebarCollapsed" class="sidebar-expand-btn" @click="sidebarCollapsed = false" title="展开会话列表">
+          <i class="fa-solid fa-chevron-right"></i>
+        </button>
+      </Transition>
 
       <!-- 中间：聊天/辩论流 -->
       <div class="chat-main chat-empty" v-if="!userState.isLoggedIn">
@@ -707,6 +725,7 @@ const handleImageUpload = async (event: Event) => {
   border: 1px solid var(--border-color-light);
   border-radius: 20px;
   overflow: hidden;
+  position: relative;
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--border-color-light) inset;
 }
 
@@ -718,7 +737,36 @@ const handleImageUpload = async (event: Event) => {
   display: flex;
   flex-direction: column;
   z-index: 10;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s;
 }
+.sidebar.collapsed {
+  width: 0;
+  border-right-color: transparent;
+}
+.sidebar-expand-btn {
+  position: absolute;
+  left: 12px;
+  top: 20px;
+  z-index: 20;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color-light);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.9rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  transition: all 0.2s;
+}
+.sidebar-expand-btn:hover { color: var(--text-main); background: var(--border-color-light); }
+.sidebar-expand-fade-enter-active, .sidebar-expand-fade-leave-active { transition: opacity 0.25s, transform 0.25s; }
+.sidebar-expand-fade-enter-from, .sidebar-expand-fade-leave-to { opacity: 0; transform: translateX(-8px); }
 .sidebar-header {
   padding: 24px 20px 16px;
   color: var(--text-main);

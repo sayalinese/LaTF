@@ -12,9 +12,10 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    allowedHosts: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:5000', // Flask 后端地址
+        target: 'http://localhost:5000', // Flask 后端（本地）
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
         cookieDomainRewrite: { '127.0.0.1': 'localhost', '*': '' }

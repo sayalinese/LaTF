@@ -18,7 +18,6 @@ const showVlmPanel = ref(false);
 const isGeneratingLogic = ref(false);
 const logicReportResult = ref<string | null>(null);
 const logicErrorMsg = ref<string | null>(null);
-const vlmSectionOpen = ref(false);
 
 // Config Status
 const sdkConfig = ref<ConfigResponse | null>(null);
@@ -132,7 +131,7 @@ const handleExplainLogic = async () => {
       <main class="dv-main" :class="{ 'has-result': !!result }">
 
         <!-- 上传区 / 预览区 -->
-        <section class="dv-upload-panel">
+        <section class="dv-upload-panel" v-if="!result">
 
           <!-- 未选择图片 -->
           <div v-if="!previewUrl" class="upload-wrapper">
@@ -183,9 +182,21 @@ const handleExplainLogic = async () => {
                 <span>{{ result.class_idx === 1 ? 'AI 生成图像' : '真实照片' }}</span>
               </div>
 
-              <!-- 新布局：左右分栏展示热力图详情 -->
+              <!-- 热力图 + 置信度 -->
               <div class="result-details-grid">
                 <div class="heatmap-section">
+                  <div class="compare-label">原始图像</div>
+                  <div class="img-center-frame">
+                    <div class="preview-img-box">
+                      <img :src="previewUrl!" alt="原图" class="preview-img" />
+                      <button class="remove-btn" @click="clearSelection">
+                        <i class="fa-solid fa-xmark"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="heatmap-section">
+                  <div class="compare-label">特征热力图</div>
                   <div class="img-center-frame">
                     <HeatmapSlider
                       v-if="result.heatmap"
@@ -194,35 +205,34 @@ const handleExplainLogic = async () => {
                     />
                   </div>
                 </div>
-
-                <div class="stats-section">
-                  <div class="confidence-block">
-                    <div class="panel-subtitle">置信度分析</div>
-                    <div class="confidence-labels">
-                      <span>真实 {{ ((1 - result.confidence) * 100).toFixed(1) }}%</span>
-                      <span>AI {{ (result.confidence * 100).toFixed(1) }}%</span>
-                    </div>
-                    <div class="confidence-bar-bg">
-                      <div class="confidence-bar-fill"
-                        :class="result.class_idx === 1 ? 'fill-fake' : 'fill-real'"
-                        :style="{ width: result.confidence * 100 + '%' }"
-                      ></div>
-                    </div>
-                    <div class="confidence-value">置信度 {{ result.confidence.toFixed(4) }}</div>
+              </div>
+              <!-- 置信度 + 深度分析 -->
+              <div class="stats-row">
+                <div class="confidence-block">
+                  <div class="panel-subtitle">置信度分析</div>
+                  <div class="confidence-labels">
+                    <span>真实 {{ ((1 - result.confidence) * 100).toFixed(1) }}%</span>
+                    <span>AI {{ (result.confidence * 100).toFixed(1) }}%</span>
                   </div>
-                  
-                  <div class="vlm-trigger-block">
-                    <div class="panel-subtitle vlm-section-toggle" @click="vlmSectionOpen = !vlmSectionOpen">
-                      深度物理逻辑鉴别
-                      <i class="fa-solid" :class="vlmSectionOpen ? 'fa-chevron-up' : 'fa-chevron-down'" style="margin-left:auto;font-size:0.8rem;color:var(--text-muted)"></i>
-                    </div>
-                    <div v-show="vlmSectionOpen" class="vlm-section-body">
-                      <p class="vlm-desc">启用多模态大模型(Qwen-VL)结合特征热力图进行深度物理规律层面的逻辑诊断。此过程可能需要几十秒时间。</p>
-                      <button class="vlm-btn" @click="handleExplainLogic" :disabled="isGeneratingLogic" v-if="!showVlmPanel">
-                        <i class="fa-solid fa-microscope"></i> 启动深度多模态诊断
-                      </button>
-                    </div>
+                  <div class="confidence-bar-bg">
+                    <div class="confidence-bar-fill"
+                      :class="result.class_idx === 1 ? 'fill-fake' : 'fill-real'"
+                      :style="{ width: result.confidence * 100 + '%' }"
+                    ></div>
                   </div>
+                  <div class="confidence-value">置信度 {{ result.confidence.toFixed(4) }}</div>
+                </div>
+              </div>
+              <!-- 深度分析入口 -->
+              <div class="vlm-trigger-block">
+                <div class="panel-subtitle">
+                  深度物理逻辑鉴别
+                </div>
+                <div class="vlm-section-body">
+                  <p class="vlm-desc">启用多模态大模型(Qwen-VL)结合特征热力图进行深度物理规律层面的逻辑诊断。此过程可能需要几十秒时间。</p>
+                  <button class="vlm-btn" @click="handleExplainLogic" :disabled="isGeneratingLogic" v-if="!showVlmPanel">
+                    <i class="fa-solid fa-microscope"></i> 启动深度多模态诊断
+                  </button>
                 </div>
               </div>
             </div>
@@ -298,6 +308,7 @@ const handleExplainLogic = async () => {
   display: flex;
   flex-direction: column;
   gap: 24px;
+  margin-top: 24px;
 }
 
 /* ── 上传 / 预览面板 ── */
@@ -326,7 +337,7 @@ const handleExplainLogic = async () => {
 }
 .preview-img {
   max-width: 100%;
-  max-height: 380px;
+  max-height: 420px;
   width: auto;
   height: auto;
   object-fit: contain;
@@ -438,6 +449,8 @@ const handleExplainLogic = async () => {
 .heatmap-section {
   flex: 1 1 0;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 .stats-section {
   flex: 1 1 0;
@@ -470,6 +483,23 @@ const handleExplainLogic = async () => {
 }
 .vlm-section-toggle:hover { color: var(--primary-color); }
 .vlm-section-body { margin-top: 14px; }
+
+.compare-label {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-align: center;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.stats-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.stats-row .confidence-block { flex: 1 1 0; }
 
 .vlm-desc {
   font-size: 0.85rem;

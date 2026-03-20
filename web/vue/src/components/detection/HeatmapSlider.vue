@@ -11,8 +11,7 @@ const sliderVal = ref(50)
 
 <template>
   <div class="heatmap-outer" v-if="heatmapBase64 && originalSrc">
-    <h4><i class="fa-solid fa-layer-group"></i> 分析对比</h4>
-    <p class="heatmap-desc">拖动滑块查看 AI 异常热力图。</p>
+
 
     <!-- 居中弹性盒子，作为图片的边框容器 -->
     <div class="slider-frame">
@@ -60,10 +59,10 @@ const sliderVal = ref(50)
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 6px;
+  padding: 0;
   border-radius: 14px;
-  border: 1px solid var(--border-color, rgba(255,255,255,0.12));
-  background: rgba(0, 0, 0, 0.04);
+  border: none;
+  background: transparent;
   max-width: 100%;
 }
 
@@ -72,10 +71,10 @@ const sliderVal = ref(50)
   position: relative;
   display: inline-flex;
   max-width: 100%;
-  border-radius: 10px;
+  border-radius: 14px;
   overflow: hidden;
-  border: 1px solid var(--border-color, rgba(255,255,255,0.15));
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  border: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
 }
 
 /* 原图：负责把包裹器撑开成图原本真实的宽高 */
