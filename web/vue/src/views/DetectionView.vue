@@ -625,7 +625,7 @@ const handleExplainLogic = async () => {
   opacity: 0.7;
   text-align: center;
 }
-.vlm-placeholder i { font-size: 2.8rem; color: #475569; }
+.vlm-placeholder i { font-size: 2.8rem; color: var(--text-muted); }
 .vlm-placeholder p { font-size: 0.88rem; line-height: 1.6; max-width: 260px; }
 
 /* ── 适配小屏幕 ── */

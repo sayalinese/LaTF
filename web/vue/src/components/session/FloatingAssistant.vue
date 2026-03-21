@@ -366,7 +366,7 @@ const sendMessage = async () => {
 }
 .fab-disabled {
   background: #334155 !important;
-  color: #64748b !important;
+  color: var(--text-muted) !important;
   cursor: not-allowed !important;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
 }
@@ -423,7 +423,7 @@ const sendMessage = async () => {
 .close-btn {
   background: none;
   border: none;
-  color: #64748b;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 1rem;
   padding: 4px 6px;
@@ -432,7 +432,7 @@ const sendMessage = async () => {
   line-height: 1;
   flex-shrink: 0;
 }
-.close-btn:hover { color: #e2e8f0; background: rgba(255,255,255,0.06); }
+.close-btn:hover { color: var(--text-main); background: rgba(255,255,255,0.06); }
 .header-info {
   display: flex;
   align-items: center;
@@ -451,12 +451,12 @@ const sendMessage = async () => {
   font-size: 1.1rem;
 }
 .header-title {
-  color: #e2e8f0;
+  color: var(--text-main);
   font-weight: 600;
   font-size: 0.95rem;
 }
 .header-sub {
-  color: #94a3b8;
+  color: var(--text-muted);
   font-size: 0.78rem;
   margin-top: 2px;
   max-width: 240px;
@@ -480,7 +480,7 @@ const sendMessage = async () => {
 .welcome-msg {
   text-align: center;
   padding: 30px 10px 10px;
-  color: #94a3b8;
+  color: var(--text-muted);
 }
 .welcome-msg > i {
   font-size: 2rem;
@@ -497,12 +497,12 @@ const sendMessage = async () => {
 }
 .welcome-msg p {
   margin: 0 0 4px;
-  color: #cbd5e1;
+  color: var(--text-muted);
   font-size: 0.95rem;
 }
 .welcome-sub {
   font-size: 0.82rem !important;
-  color: #64748b !important;
+  color: var(--text-muted) !important;
   line-height: 1.5;
 }
 .quick-actions {
@@ -586,7 +586,7 @@ const sendMessage = async () => {
 .chat-msg.assistant .msg-bubble {
   background: var(--card-bg, rgba(255,255,255,0.04));
   border: 1px solid var(--border-color-light, rgba(255,255,255,0.08));
-  color: #cbd5e1;
+  color: var(--text-muted);
   border-radius: 4px 12px 12px 12px;
 }
 .chat-msg.user .msg-bubble {
@@ -616,7 +616,7 @@ const sendMessage = async () => {
   height: 40px;
   background: var(--border-color-light, rgba(255,255,255,0.06));
   border: 1px solid var(--border-color, rgba(255,255,255,0.1));
-  color: #e2e8f0;
+  color: var(--text-main);
   border-radius: 20px;
   padding: 0 16px;
   font-size: 0.88rem;
@@ -627,7 +627,7 @@ const sendMessage = async () => {
   border-color: rgba(139, 92, 246, 0.5);
   box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15);
 }
-.assistant-input input::placeholder { color: #475569; }
+.assistant-input input::placeholder { color: var(--text-muted); }
 .assistant-input input:disabled { opacity: 0.6; }
 .assistant-input .send-btn {
   width: 40px;
@@ -650,7 +650,7 @@ const sendMessage = async () => {
 }
 .assistant-input .send-btn:disabled {
   background: #334155;
-  color: #64748b;
+  color: var(--text-muted);
   cursor: not-allowed;
   box-shadow: none;
 }
@@ -672,19 +672,19 @@ const sendMessage = async () => {
 .md-bubble p { margin: 0 0 6px; }
 .md-bubble p:last-child { margin-bottom: 0; }
 .md-bubble h1, .md-bubble h2, .md-bubble h3, .md-bubble h4 {
-  color: #e2e8f0;
+  color: var(--text-main);
   margin: 10px 0 6px;
   font-weight: 600;
   line-height: 1.4;
 }
 .md-bubble h3 { font-size: 0.92rem; color: #a78bfa; }
-.md-bubble h4 { font-size: 0.88rem; color: #94a3b8; }
+.md-bubble h4 { font-size: 0.88rem; color: var(--text-muted); }
 .md-bubble ul, .md-bubble ol {
   padding-left: 18px;
   margin: 4px 0 6px;
 }
 .md-bubble li { margin-bottom: 3px; }
-.md-bubble strong { color: #e2e8f0; font-weight: 600; }
+.md-bubble strong { color: var(--text-main); font-weight: 600; }
 .md-bubble em { color: #a5b4fc; }
 .md-bubble code {
   background: rgba(139, 92, 246, 0.15);
@@ -702,12 +702,12 @@ const sendMessage = async () => {
   overflow-x: auto;
   margin: 6px 0;
 }
-.md-bubble pre code { background: none; padding: 0; color: #cbd5e1; }
+.md-bubble pre code { background: none; padding: 0; color: var(--text-muted); }
 .md-bubble blockquote {
   border-left: 3px solid rgba(139, 92, 246, 0.5);
   margin: 6px 0;
   padding: 4px 10px;
-  color: #94a3b8;
+  color: var(--text-muted);
   font-style: italic;
 }
 .md-bubble hr {
@@ -720,20 +720,20 @@ const sendMessage = async () => {
 [data-theme="light"] .assistant-panel {
   box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.06) inset;
 }
-[data-theme="light"] .header-sub { color: #475569; }
-[data-theme="light"] .welcome-msg { color: #475569; }
+[data-theme="light"] .header-sub { color: var(--text-muted); }
+[data-theme="light"] .welcome-msg { color: var(--text-muted); }
 [data-theme="light"] .welcome-msg p { color: #1e293b; }
-[data-theme="light"] .welcome-sub { color: #64748b !important; }
+[data-theme="light"] .welcome-sub { color: var(--text-muted) !important; }
 [data-theme="light"] .quick-btn { color: #4338ca; }
 [data-theme="light"] .chat-msg.assistant .msg-bubble { color: #1e293b; }
 [data-theme="light"] .md-bubble h3 { color: #4338ca; }
-[data-theme="light"] .md-bubble h4 { color: #475569; }
+[data-theme="light"] .md-bubble h4 { color: var(--text-muted); }
 [data-theme="light"] .md-bubble em { color: #4338ca; }
 [data-theme="light"] .md-bubble code { background: rgba(79,70,229,0.08); color: #4338ca; }
 [data-theme="light"] .md-bubble pre { background: rgba(0,0,0,0.05); border-color: rgba(79,70,229,0.15); }
 [data-theme="light"] .md-bubble pre code { color: #1e293b; }
-[data-theme="light"] .md-bubble blockquote { color: #64748b; border-left-color: rgba(79,70,229,0.4); }
+[data-theme="light"] .md-bubble blockquote { color: var(--text-muted); border-left-color: rgba(79,70,229,0.4); }
 [data-theme="light"] .md-bubble hr { border-top-color: rgba(0,0,0,0.1); }
 [data-theme="light"] .assistant-input input { color: #1e293b; }
-[data-theme="light"] .assistant-input input::placeholder { color: #94a3b8; }
+[data-theme="light"] .assistant-input input::placeholder { color: var(--text-muted); }
 </style>

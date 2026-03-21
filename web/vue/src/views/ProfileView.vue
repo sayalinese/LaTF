@@ -515,14 +515,14 @@ const cancelEdit = () => {
 }
 .form-header { margin-bottom: 30px; text-align: left; }
 .form-header h3 { font-size: 1.6rem; color: var(--text-main); margin-bottom: 6px; }
-.form-header p { color: #64748b; font-size: 0.9rem; }
+.form-header p { color: var(--text-muted); font-size: 0.9rem; }
 
 .input-group { margin-bottom: 16px; }
 .input-icon-wrapper {
   position: relative; display: flex; align-items: center;
 }
 .input-icon-wrapper i {
-  position: absolute; left: 16px; color: #64748b; transition: 0.3s;
+  position: absolute; left: 16px; color: var(--text-muted); transition: 0.3s;
 }
 .input-icon-wrapper input {
   width: 100%; height: 48px;
@@ -587,7 +587,7 @@ const cancelEdit = () => {
 .register-variant:hover { box-shadow: 0 12px 25px rgba(14, 165, 233, 0.4);}
 
 .toggle-text {
-  text-align: center; margin-top: 24px; font-size: 0.9rem; color: #64748b;
+  text-align: center; margin-top: 24px; font-size: 0.9rem; color: var(--text-muted);
 }
 .toggle-text a { color: #60a5fa; font-weight: 500; text-decoration: none; padding-bottom: 2px; border-bottom: 1px dashed transparent; transition: 0.2s;}
 .toggle-text a:hover { color: #93c5fd; border-color: #93c5fd; }

@@ -19,7 +19,7 @@
     --bg-gradient: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
     --card-bg: rgba(255, 255, 255, 0.7);
     --text-main: #1e293b;
-    --text-muted: #475569;
+    --text-muted: #334155; /* 深化灰色以提高对比度 */
     --border-color: rgba(0, 0, 0, 0.1);
     --border-color-light: rgba(0, 0, 0, 0.05);
     --panel-bg: rgba(255, 255, 255, 0.9);

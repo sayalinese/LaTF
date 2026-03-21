@@ -476,7 +476,7 @@ const handleImageUpload = async (event: Event) => {
               <div class="rename-wrapper">
                 <input class="rename-input" v-model="renameTitle" @keyup.enter="confirmRename" @keyup.esc="isRenamingSession = false" placeholder="输入新标题..." />
                 <button class="rename-confirm-btn" @click="confirmRename" title="确认"><i class="fa-solid fa-check"></i></button>
-                <button class="rename-confirm-btn" @click="isRenamingSession = false" title="取消" style="color:#94a3b8"><i class="fa-solid fa-xmark"></i></button>
+                <button class="rename-confirm-btn" @click="isRenamingSession = false" title="取消" style="color:var(--text-muted)"><i class="fa-solid fa-xmark"></i></button>
               </div>
             </template>
             <h3 v-else>{{ activeSession.title }}</h3>
@@ -902,7 +902,7 @@ const handleImageUpload = async (event: Event) => {
   text-align: center;
   color: var(--text-muted);
 }
-.not-logged-in-tip i { font-size: 2rem; color: #475569; }
+.not-logged-in-tip i { font-size: 2rem; color: var(--text-muted); }
 .not-logged-in-tip p { font-size: 0.85rem; line-height: 1.5; }
 .login-tip-btn {
   margin-top: 4px;
@@ -1117,14 +1117,14 @@ const handleImageUpload = async (event: Event) => {
   border-color: rgba(59, 130, 246, 0.5);
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
 }
-.chat-input-area input::placeholder { color: #64748b; }
+.chat-input-area input::placeholder { color: var(--text-muted); }
 .emoji-btn {
   position: absolute; right: 12px;
   background: none; border: none; color: var(--text-muted);
   cursor: pointer; font-size: 1.2rem;
   transition: color 0.2s;
 }
-.emoji-btn:hover { color: #cbd5e1; }
+.emoji-btn:hover { color: var(--text-muted); }
 
 .upload-btn, .send-btn { 
   width: 48px; height: 48px; border-radius: 50%; border: none; 
@@ -1132,7 +1132,7 @@ const handleImageUpload = async (event: Event) => {
   cursor: pointer; transition: all 0.2s;
 }
 .upload-btn {
-  background: var(--border-color-light); color: #cbd5e1;
+  background: var(--border-color-light); color: var(--text-muted);
 }
 .upload-btn:hover { background: var(--border-color); }
 .send-btn { 
@@ -1185,7 +1185,7 @@ const handleImageUpload = async (event: Event) => {
   border: 1px solid rgba(232, 121, 249, 0.3);
 }
 
-.ai-content { padding: 24px; overflow-y: auto; color: #e2e8f0; flex: 1;}
+.ai-content { padding: 24px; overflow-y: auto; color: var(--text-main); flex: 1;}
 
 /* 扫描分析状态 */
 .judging-state { padding: 40px 10px; }
@@ -1207,7 +1207,7 @@ const handleImageUpload = async (event: Event) => {
   100% { top: 100%; opacity: 0; }
 }
 
-.judging-title { text-align: center; color: #e2e8f0; margin-bottom: 30px; font-weight: 500;}
+.judging-title { text-align: center; color: var(--text-main); margin-bottom: 30px; font-weight: 500;}
 .judging-steps { list-style: none; padding: 0; margin: 0; }
 .step {
   padding: 16px; margin-bottom: 12px; border-radius: 12px;
@@ -1217,12 +1217,12 @@ const handleImageUpload = async (event: Event) => {
 }
 .step.done { color: #10b981; background: rgba(16, 185, 129, 0.05); border-color: rgba(16, 185, 129, 0.2); }
 .step.active { color: #c084fc; background: rgba(192, 132, 252, 0.08); border-color: rgba(192, 132, 252, 0.3); box-shadow: 0 4px 15px rgba(168, 85, 247, 0.1);}
-.step.skipped { color: #64748b; opacity: 0.6; }
-.step-note { font-size: 0.75rem; color: #94a3b8; margin-left: 4px; }
+.step.skipped { color: var(--text-muted); opacity: 0.6; }
+.step-note { font-size: 0.75rem; color: var(--text-muted); margin-left: 4px; }
 
 /* VL 开关 */
 .vl-toggle { padding: 12px 0; }
-.toggle-label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.9rem; color: #cbd5e1; }
+.toggle-label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.9rem; color: var(--text-muted); }
 .toggle-label input[type="checkbox"] { accent-color: #8b5cf6; width: 16px; height: 16px; }
 .toggle-text { display: flex; align-items: center; gap: 6px; }
 .toggle-text i { color: #8b5cf6; }
@@ -1266,7 +1266,7 @@ const handleImageUpload = async (event: Event) => {
 
 .panel-section { margin-bottom: 24px; }
 .section-title {
-  font-size: 0.95rem; font-weight: 600; color: #e2e8f0; margin-bottom: 16px;
+  font-size: 0.95rem; font-weight: 600; color: var(--text-main); margin-bottom: 16px;
   display: flex; align-items: center; gap: 8px;
 }
 .section-title i { color: #8b5cf6; }
@@ -1274,11 +1274,11 @@ const handleImageUpload = async (event: Event) => {
 /* 概率分布条 */
 .prob-bars { display: flex; flex-direction: column; gap: 10px; }
 .prob-item { display: flex; align-items: center; gap: 10px; }
-.prob-label { width: 80px; font-size: 0.82rem; color: #94a3b8; text-align: right; flex-shrink: 0; }
+.prob-label { width: 80px; font-size: 0.82rem; color: var(--text-muted); text-align: right; flex-shrink: 0; }
 .prob-bar-bg { flex: 1; height: 8px; background: var(--border-color-light); border-radius: 4px; overflow: hidden; }
 .prob-bar-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, #6366f1, #8b5cf6); transition: width 0.8s ease; }
 .prob-bar-fill.highlight { background: linear-gradient(90deg, #ef4444, #f87171); }
-.prob-value { width: 52px; font-size: 0.82rem; color: #cbd5e1; text-align: left; flex-shrink: 0; }
+.prob-value { width: 52px; font-size: 0.82rem; color: var(--text-muted); text-align: left; flex-shrink: 0; }
 
 .heatmap-placeholder {
   position: relative; border-radius: 12px; overflow: hidden;
@@ -1318,7 +1318,7 @@ const handleImageUpload = async (event: Event) => {
 }
 .vl-trigger-btn:hover { filter: brightness(1.1); box-shadow: 0 2px 10px rgba(139, 92, 246, 0.3); }
 .vl-text { white-space: pre-wrap; }
-.vl-placeholder { text-align: center; padding: 16px; color: #64748b; font-size: 0.85rem; }
+.vl-placeholder { text-align: center; padding: 16px; color: var(--text-muted); font-size: 0.85rem; }
 .cursor-blink { animation: blink 1s step-end infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -1328,7 +1328,7 @@ const handleImageUpload = async (event: Event) => {
   padding: 20px; border-radius: 16px; text-align: center;
 }
 .verdict-title { color: #fbbf24; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 1.1rem;}
-.verdict-box p { color: #e2e8f0; font-size: 0.95rem; margin-bottom: 16px; line-height: 1.5; }
+.verdict-box p { color: var(--text-main); font-size: 0.95rem; margin-bottom: 16px; line-height: 1.5; }
 .verdict-box p strong { color: #ef4444; font-size: 1.1em;}
 .apply-verdict-btn {
   width: 100%; background: linear-gradient(135deg, #f59e0b, #d97706); color: white;

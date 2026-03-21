@@ -115,7 +115,7 @@ const toggleThink = () => {
 
 .think-toggle:hover {
     background: var(--border-color-light);
-    color: #cbd5e1;
+    color: var(--text-muted);
 }
 
 .think-content {
