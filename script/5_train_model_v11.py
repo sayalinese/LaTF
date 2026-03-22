@@ -6,6 +6,7 @@ import logging
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
@@ -82,7 +83,15 @@ def train_one_epoch(model, loader, optimizer, scaler, criterion, device, epoch, 
         if batch_len >= 6:
              # V13 TruFor
              trufor = batch[5].to(device, non_blocking=True)
-        
+
+        # [V14] 豆包真图非对称惩罚：提取路径，对 label=0 且路径含 doubao 的样本施加更高权重
+        img_paths = batch[-1]  # dataset 末位始终追加 path 字符串
+        sample_weights = torch.ones(labels.size(0), device=device)
+        doubao_real_w = getattr(args, 'doubao_real_weight', 3.0)
+        for _j, (_p, _lbl) in enumerate(zip(img_paths, labels.cpu().tolist())):
+            if _lbl == 0 and 'doubao' in _p.lower().replace('\\', '/'):
+                sample_weights[_j] = doubao_real_w
+
         optimizer.zero_grad()
         
         with autocast('cuda', dtype=amp_dtype, enabled=args.use_amp):
@@ -91,8 +100,9 @@ def train_one_epoch(model, loader, optimizer, scaler, criterion, device, epoch, 
                 # Pass TruFor map if available (V13)
                 logits, seg_logits = model(img_clip, img_highres, loss_maps, trufor_map=trufor, return_seg=True)
                 
-                # [V12] Classification Loss
-                cls_loss = criterion(logits, labels)
+                # [V14] 逐样本加权交叉熵（豆包真图惩罚倍率 doubao_real_weight）
+                cls_loss_raw = F.cross_entropy(logits, labels, label_smoothing=0.1, reduction='none')
+                cls_loss = (cls_loss_raw * sample_weights).mean()
                 
                 # [V12] Segmentation Loss
                 # Resize mask to match seg_logits size (32x32) for efficiency
@@ -107,7 +117,8 @@ def train_one_epoch(model, loader, optimizer, scaler, criterion, device, epoch, 
                 total_cls_loss += cls_loss.item()
             else:
                 logits = model(img_clip, img_highres, loss_maps, trufor_map=trufor)
-                loss = criterion(logits, labels)
+                loss_raw = F.cross_entropy(logits, labels, label_smoothing=0.1, reduction='none')
+                loss = (loss_raw * sample_weights).mean()
                 total_cls_loss += loss.item()
 
         # Backward
@@ -225,7 +236,10 @@ def main():
     parser.add_argument('--texture_model', type=str, default=os.getenv('TEXTURE_MODEL', 'convnext_tiny'), help='Backbone for texture branch')
     parser.add_argument('--clip_type', type=str, default=os.getenv('CLIP_TYPE', 'RN50x64'), help='CLIP visual backbone')
     parser.add_argument('--highres_size', type=int, default=int(os.getenv('HIGHRES_SIZE', '512')))
-    
+    parser.add_argument('--doubao_real_weight', type=float,
+                        default=float(os.getenv('DOUBAO_REAL_WEIGHT', '3.0')),
+                        help='豆包真图(label=0)被误判时的损失惩罚倍率')
+
     args = parser.parse_args()
     set_seed(args.seed)
     
@@ -302,7 +316,9 @@ def main():
         'train_loss': [],
         'train_acc': [],
         'val_loss': [],
-        'val_acc': []
+        'val_acc': [],
+        'lr': [],
+        'is_best': [],
     }
     
     for epoch in range(1, args.epochs + 1):
@@ -316,11 +332,14 @@ def main():
         history['train_acc'].append(train_acc)
         history['val_loss'].append(val_loss)
         history['val_acc'].append(val_acc)
+        history['lr'].append(scheduler.get_last_lr()[0])
+        history['is_best'].append(False)  # 先占位，下面再覆盖
         
         # Save Best
         if val_acc > best_acc:
             best_acc = val_acc
             no_improve_epochs = 0 # Reset counter
+            history['is_best'][-1] = True  # 标记当前 epoch 为 best
             logger.info(f"New Best Acc: {best_acc:.4f}. Saving model...")
             torch.save({
                 'epoch': epoch,
@@ -348,34 +367,54 @@ def main():
         import pandas as pd
         import matplotlib.pyplot as plt
         import seaborn as sns
-        from sklearn.metrics import confusion_matrix, roc_curve, auc, roc_auc_score
-        
+        from sklearn.metrics import confusion_matrix, roc_curve, auc, roc_auc_score, precision_recall_curve, average_precision_score
+
         # 1. Save History CSV
         df_history = pd.DataFrame(history)
         df_history.to_csv(out_dir / 'training_history.csv', index=False)
         logger.info(f"Saved training history to {out_dir / 'training_history.csv'}")
-        
-        # 2. Plot Training Curves
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-        
-        # Loss curve
-        ax1.plot(df_history['epoch'], df_history['train_loss'], label='Train Loss')
-        ax1.plot(df_history['epoch'], df_history['val_loss'], label='Val Loss')
-        ax1.set_title('Loss Curve')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.legend()
-        
-        # Accuracy curve
-        ax2.plot(df_history['epoch'], df_history['train_acc'], label='Train Acc')
-        ax2.plot(df_history['epoch'], df_history['val_acc'], label='Val Acc')
-        ax2.set_title('Accuracy Curve')
-        ax2.set_xlabel('Epoch')
-        ax2.set_ylabel('Accuracy')
-        ax2.legend()
-        
+
+        # 2. 训练曲线（带早停点标注 + 学习率副轴）
+        best_epochs = [e for e, b in zip(df_history['epoch'], df_history['is_best']) if b]
+        early_stop_epoch = df_history['epoch'].iloc[-1] if len(df_history) < args.epochs else None
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+        # Loss
+        axes[0].plot(df_history['epoch'], df_history['train_loss'], label='Train Loss', color='steelblue')
+        axes[0].plot(df_history['epoch'], df_history['val_loss'], label='Val Loss', color='tomato')
+        for be in best_epochs:
+            axes[0].axvline(x=be, color='green', linestyle='--', alpha=0.5, label=f'Best @ ep{be}' if be == best_epochs[-1] else None)
+        if early_stop_epoch and early_stop_epoch < args.epochs:
+            axes[0].axvline(x=early_stop_epoch, color='gray', linestyle=':', alpha=0.8, label=f'Early Stop @ ep{early_stop_epoch}')
+        axes[0].set_title('Loss Curve')
+        axes[0].set_xlabel('Epoch')
+        axes[0].set_ylabel('Loss')
+        axes[0].legend(fontsize=8)
+
+        # Accuracy
+        axes[1].plot(df_history['epoch'], df_history['train_acc'], label='Train Acc', color='steelblue')
+        axes[1].plot(df_history['epoch'], df_history['val_acc'], label='Val Acc', color='tomato')
+        for be in best_epochs:
+            axes[1].axvline(x=be, color='green', linestyle='--', alpha=0.5)
+        if early_stop_epoch and early_stop_epoch < args.epochs:
+            axes[1].axvline(x=early_stop_epoch, color='gray', linestyle=':', alpha=0.8)
+        axes[1].set_title('Accuracy Curve')
+        axes[1].set_xlabel('Epoch')
+        axes[1].set_ylabel('Accuracy')
+        axes[1].legend(fontsize=8)
+
+        # Learning Rate
+        ax_lr = axes[2]
+        ax_lr.plot(df_history['epoch'], df_history['lr'], color='purple', label='Learning Rate')
+        ax_lr.set_title('Learning Rate Schedule')
+        ax_lr.set_xlabel('Epoch')
+        ax_lr.set_ylabel('LR')
+        ax_lr.set_yscale('log')
+        ax_lr.legend(fontsize=8)
+
         plt.tight_layout()
-        plt.savefig(out_dir / 'training_curves.png')
+        plt.savefig(out_dir / 'training_curves.png', dpi=150)
         plt.close()
         logger.info(f"Saved curves to {out_dir / 'training_curves.png'}")
         
@@ -417,11 +456,125 @@ def main():
                 plt.title('Receiver Operating Characteristic (ROC)')
                 plt.legend(loc="lower right")
                 plt.tight_layout()
-                plt.savefig(out_dir / 'roc_curve.png')
+                plt.savefig(out_dir / 'roc_curve.png', dpi=150)
                 plt.close()
                 logger.info(f"Saved ROC Curve to {out_dir / 'roc_curve.png'}")
-                
-                # 5. Bad Cases Visualisation
+
+                # 5. PR 曲线（Precision-Recall）
+                precision_arr, recall_arr, _ = precision_recall_curve(final_labels, final_probs)
+                ap_score = average_precision_score(final_labels, final_probs)
+                plt.figure(figsize=(6, 5))
+                plt.plot(recall_arr, precision_arr, color='darkorchid', lw=2,
+                         label=f'PR curve (AP = {ap_score:.4f})')
+                plt.axhline(y=sum(final_labels)/len(final_labels), color='gray',
+                            linestyle='--', label='Baseline (random)')
+                plt.xlim([0.0, 1.0])
+                plt.ylim([0.0, 1.05])
+                plt.xlabel('Recall')
+                plt.ylabel('Precision')
+                plt.title('Precision-Recall Curve')
+                plt.legend(loc='lower left')
+                plt.tight_layout()
+                plt.savefig(out_dir / 'pr_curve.png', dpi=150)
+                plt.close()
+                logger.info(f"Saved PR Curve to {out_dir / 'pr_curve.png'}")
+
+                # 6. 置信度分布直方图（Score Distribution）
+                real_probs  = [p for p, l in zip(final_probs, final_labels) if l == 0]
+                fake_probs  = [p for p, l in zip(final_probs, final_labels) if l == 1]
+                plt.figure(figsize=(8, 5))
+                plt.hist(real_probs, bins=40, alpha=0.6, color='steelblue',
+                         label=f'Real (n={len(real_probs)})', density=True)
+                plt.hist(fake_probs, bins=40, alpha=0.6, color='tomato',
+                         label=f'AI Fake (n={len(fake_probs)})', density=True)
+                plt.axvline(x=0.5, color='black', linestyle='--', lw=1.5, label='Threshold=0.5')
+                plt.xlabel('P(AI Fake)')
+                plt.ylabel('Density')
+                plt.title('Score Distribution: Real vs AI Fake')
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(out_dir / 'score_distribution.png', dpi=150)
+                plt.close()
+                logger.info(f"Saved Score Distribution to {out_dir / 'score_distribution.png'}")
+
+                # 7. 按类别置信度笱线图（Per-Category Boxplot）
+                # 读取 evaluate_by_category 的临时标注文件来区分类别
+                try:
+                    import collections
+                    possible_ann = [
+                        'annotation/val_sdxl.txt',
+                        'annotation/test_sdxl.txt',
+                    ]
+                    cat_scores = collections.defaultdict(list)  # cat -> [prob, ...]
+                    cat_labels_map = collections.defaultdict(list)
+                    for ann_f in possible_ann:
+                        if not Path(ann_f).exists():
+                            continue
+                        with open(ann_f, encoding='utf-8') as _f:
+                            _lines = _f.readlines()
+                        for _line in _lines:
+                            _line = _line.strip()
+                            if not _line: continue
+                            _parts = _line.rsplit('\t', 1) if '\t' in _line else _line.rsplit(None, 1)
+                            if len(_parts) != 2: continue
+                            _p, _l = _parts[0], int(_parts[1])
+                            _pn = _p.lower().replace('\\', '/')
+                            if 'doubao' in _pn and _l == 0:
+                                _cat = 'Doubao_Real'
+                            elif 'doubao' in _pn and _l == 1:
+                                _cat = 'Doubao_Fake'
+                            elif 'sdxl' in _pn:
+                                _cat = 'SDXL'
+                            elif 'flux' in _pn:
+                                _cat = 'Flux'
+                            else:
+                                _cat = 'Real'
+                            cat_labels_map[_cat].append(_l)
+
+                    # 对应 val_loader 中的顺序提取每个样本的 prob
+                    # 由于 val_loader shuffle=False，所以 final_probs 和 val_dataset 的 index 是对齐的
+                    # 这里我们简化处理：拿 val_dataset 的路径列表匹配
+                    all_paths_in_val = []
+                    for _idx in range(len(val_dataset.test_list)):
+                        _imgpath, _ = val_dataset.test_list[_idx]
+                        all_paths_in_val.append(_imgpath.lower().replace('\\', '/'))
+
+                    path_cat_scores = collections.defaultdict(list)
+                    for _idx, (_prob, _path_n) in enumerate(zip(final_probs, all_paths_in_val)):
+                        if 'doubao' in _path_n:
+                            _lbl_here = val_dataset.test_list[_idx][1]
+                            _cat = 'Doubao_Real' if _lbl_here == 0 else 'Doubao_Fake'
+                        elif 'sdxl' in _path_n:
+                            _cat = 'SDXL'
+                        elif 'flux' in _path_n:
+                            _cat = 'Flux'
+                        else:
+                            _cat = 'Real'
+                        path_cat_scores[_cat].append(_prob)
+
+                    if path_cat_scores:
+                        _cats_sorted = ['Real', 'Doubao_Real', 'SDXL', 'Flux', 'Doubao_Fake']
+                        _box_data = [path_cat_scores.get(c, [0]) for c in _cats_sorted]
+                        _colors = ['steelblue', 'dodgerblue', 'tomato', 'salmon', 'firebrick']
+                        fig_box, ax_box = plt.subplots(figsize=(10, 5))
+                        bp = ax_box.boxplot(_box_data, patch_artist=True, notch=False,
+                                            medianprops=dict(color='black', lw=2))
+                        for patch, color in zip(bp['boxes'], _colors):
+                            patch.set_facecolor(color)
+                            patch.set_alpha(0.7)
+                        ax_box.set_xticklabels([f"{c}\n(n={len(path_cat_scores.get(c,[]))})" for c in _cats_sorted])
+                        ax_box.axhline(y=0.5, color='black', linestyle='--', lw=1.2, label='Threshold=0.5')
+                        ax_box.set_ylabel('P(AI Fake)')
+                        ax_box.set_title('Per-Category Score Distribution (Boxplot)')
+                        ax_box.legend(fontsize=9)
+                        plt.tight_layout()
+                        plt.savefig(out_dir / 'per_category_boxplot.png', dpi=150)
+                        plt.close()
+                        logger.info(f"Saved Per-Category Boxplot to {out_dir / 'per_category_boxplot.png'}")
+                except Exception as _e:
+                    logger.warning(f"Per-category boxplot failed: {_e}")
+
+                # 8. Bad Cases Visualisation (original #5)
                 try:
                     bad_cases_dir = out_dir / 'bad_cases'
                     bad_cases_dir.mkdir(exist_ok=True)
