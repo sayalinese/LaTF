@@ -28,7 +28,7 @@ def evaluate_category_accuracy(model_path=None):
     if model_path:
         ckpt_path = model_path
     else:
-        ckpt_path = "outputs/v13_trufor_retrain/best.pth"
+        ckpt_path = "outputs/v13_doubao_focused/best.pth"
     print(f"Testing Model: {ckpt_path}")
     
     # Preview Dir for Misclassified Images

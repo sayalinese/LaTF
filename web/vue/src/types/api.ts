@@ -1,10 +1,24 @@
+export interface CascadeInfo {
+  global_prob: number;
+  local_prob: number | null;
+  crop_bbox: [number, number, number, number] | null;
+}
+
 export interface PredictResponse {
   class_name: string;
   confidence: number;
   class_idx: number;
   probabilities: Record<string, number>;
   heatmap?: string | null;
-  debug?: Record<string, any>;
+  cascade_info?: CascadeInfo;
+  debug?: {
+    model_version: string;
+    resolved_out_dir: string;
+    ckpt_path?: string | null;
+    cascade_enabled: boolean;
+    heatmap_source?: string;
+    trufor_heatmap?: string | null;
+  };
 }
 
 export interface ConfigResponse {

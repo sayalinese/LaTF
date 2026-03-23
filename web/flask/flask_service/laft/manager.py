@@ -37,7 +37,8 @@ class LaFTManager:
         self.resolved_out_dir = None
         
         self.use_cascade = os.getenv("USE_CASCADE_INFERENCE", "true").lower() == "true"
-        self.cascade_threshold = float(os.getenv("CASCADE_THRESHOLD", "0.3"))
+        self.cascade_threshold = float(os.getenv("CASCADE_THRESHOLD", "0.25"))
+        self.cascade_high_threshold = float(os.getenv("CASCADE_HIGH_THRESHOLD", "0.90"))
         self.model_version = os.getenv("MODEL_VERSION", "V13")
         self.ai_confidence_threshold = float(os.getenv("AI_CONFIDENCE_THRESHOLD", "0.5"))
         
@@ -138,9 +139,10 @@ class LaFTManager:
                 lare_extractor=self.lare_extractor,
                 trufor_extractor=self.trufor_extractor,
                 device=self.device,
-                threshold=self.cascade_threshold
+                threshold=self.cascade_threshold,
+                high_threshold=self.cascade_high_threshold
             )
-            print(f"[Config] Cascade inference enabled (threshold={self.cascade_threshold})")
+            print(f"[Config] Cascade inference enabled (low={self.cascade_threshold}, high={self.cascade_high_threshold})")
         else:
             self.cascade_inference = None
             print("[Config] Using standard inference")
@@ -224,13 +226,19 @@ class LaFTManager:
 
     def _predict_cascade(self, img: Image.Image):
         trufor_vis_map = None
+        trufor_heatmap_b64 = None
         if self.trufor_extractor is not None:
             try:
-                img_np = np.asarray(img, dtype=np.float32) / 255.0
+                # TruFor 需要尺寸是 32 的整倍数，否则输出 map 会被截断只覆盖部分区域
+                TRUFOR_VIS_SIZE = 1024
+                img_resized = img.resize((TRUFOR_VIS_SIZE, TRUFOR_VIS_SIZE), Image.BILINEAR)
+                img_np = np.asarray(img_resized, dtype=np.float32) / 255.0
                 tf_input = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(self.device)
                 tf_np_vis = self.trufor_extractor.extract_batch(tf_input)
                 if tf_np_vis is not None and len(tf_np_vis) > 0:
                     trufor_vis_map = tf_np_vis[0]
+                    # 热力图叠加到原始尺寸图片上
+                    trufor_heatmap_b64 = self._generate_heatmap_base64(trufor_vis_map, img)
             except Exception:
                 trufor_vis_map = None
 
@@ -267,12 +275,17 @@ class LaFTManager:
                 "resolved_out_dir": self.resolved_out_dir,
                 "ckpt_path": self.loaded_ckpt_path,
                 "cascade_enabled": True,
-                "heatmap_source": map_source_type
+                "heatmap_source": map_source_type,
+                "trufor_heatmap": trufor_heatmap_b64
             }
         }
 
     def _predict_standard(self, img: Image.Image):
         from torchvision import transforms
+        # 推理性能配置
+        use_trufor_inference = os.getenv("USE_TRUFOR_INFERENCE", "true").lower() == "true"
+        trufor_infer_size = int(os.getenv("TRUFOR_INFERENCE_SIZE", "512"))  # 训练用1024，推理用512节省显存
+
         preprocess_clip = transforms.Compose([
             transforms.Resize((448, 448)), transforms.ToTensor(),
             transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
@@ -281,10 +294,11 @@ class LaFTManager:
             transforms.Resize((512, 512)), transforms.ToTensor(),
             transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
         ])
-        preprocess_trufor = transforms.Compose([transforms.Resize((1024, 1024)), transforms.ToTensor()])
+        preprocess_trufor = transforms.Compose([transforms.Resize((trufor_infer_size, trufor_infer_size)), transforms.ToTensor()])
         
         with torch.no_grad():
             loss_map = self.lare_extractor.extract_single(img).to(self.device)
+            if torch.cuda.is_available(): torch.cuda.empty_cache()  # SDXL推理后立即清缓存
             clip_input = preprocess_clip(img).unsqueeze(0).to(self.device)
             amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
             
@@ -295,9 +309,10 @@ class LaFTManager:
                 if self.model_version in ["V11", "V13"]:
                     highres_input = preprocess_highres(img).unsqueeze(0).to(self.device)
                     trufor_map = None
-                    if self.trufor_extractor is not None:
+                    if self.trufor_extractor is not None and use_trufor_inference:
                          tf_in = preprocess_trufor(img).unsqueeze(0).to(self.device)
                          tf_np = self.trufor_extractor.extract_batch(tf_in)
+                         del tf_in  # 释放输入张量
                          if tf_np is not None:
                              tf_tensor = torch.from_numpy(tf_np).unsqueeze(1).float()
                              tf_tensor = F.interpolate(tf_tensor, size=(448, 448), mode='bilinear', align_corners=False)

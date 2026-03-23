@@ -22,6 +22,11 @@ class DisputeSession(db.Model):
     topic_name = db.Column(db.String(255), nullable=False, default='未命名交易纠纷')
     platform = db.Column(db.String(50), default='taobao')  # taobao, xianyu, jd, pdd
     status = db.Column(db.String(20), default='open')  # open, ai_judging, closed
+    # 订单/商品信息
+    order_id = db.Column(db.String(100))       # 订单号
+    product_name = db.Column(db.String(255))    # 商品名称
+    product_price = db.Column(db.String(50))    # 成交金额
+    product_image = db.Column(db.String(500))   # 商品图片URL
     created_at = db.Column(db.DateTime(timezone=True), default=datetime.utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
     

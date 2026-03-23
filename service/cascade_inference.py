@@ -12,6 +12,7 @@ from PIL import Image
 from torchvision import transforms
 from typing import Tuple, Dict, Optional
 import cv2
+import os
 
 
 class CascadeInference:
@@ -29,7 +30,8 @@ class CascadeInference:
         trufor_extractor=None,
         device: str = "cuda",
         input_size: int = 448,
-        threshold: float = 0.5,
+        threshold: float = 0.25,
+        high_threshold: float = 0.90,
         zoom_padding: float = 0.2,
         min_crop_ratio: float = 0.25,
         max_crop_ratio: float = 0.75,
@@ -41,7 +43,8 @@ class CascadeInference:
             trufor_extractor: TruFor feature extractor instance (Optional)
             device: Device to run inference on
             input_size: Model input size (448 for CLIP RN50x64)
-            threshold: Probability threshold to trigger local zoom
+            threshold: 下界 - global_prob 超过此才触发 Stage 2
+            high_threshold: 上界 - global_prob 超过此则直接输出，跳过 Stage 2
             zoom_padding: Padding ratio around detected region (0.2 = 20% each side)
             min_crop_ratio: Minimum crop size as ratio of original image
             max_crop_ratio: Maximum crop size as ratio of original image
@@ -52,6 +55,7 @@ class CascadeInference:
         self.device = device
         self.input_size = input_size
         self.threshold = threshold
+        self.high_threshold = high_threshold
         self.zoom_padding = zoom_padding
         self.min_crop_ratio = min_crop_ratio
         self.max_crop_ratio = max_crop_ratio
@@ -76,9 +80,10 @@ class CascadeInference:
             ),
         ])
 
-        # [V13] TruFor Preprocessing (Match training gen script)
+        # [V13] TruFor Preprocessing — 使用较低分辨率减少推理显存（可通过环境变量调节）
+        _trufor_size = int(os.getenv("TRUFOR_INFERENCE_SIZE", "512"))
         self.trufor_transform = transforms.Compose([
-            transforms.Resize((1024, 1024)),
+            transforms.Resize((_trufor_size, _trufor_size)),
             transforms.ToTensor(),
         ])
     
@@ -294,29 +299,22 @@ class CascadeInference:
              highres_tensor = self.highres_transform(image).unsqueeze(0).to(self.device)
         
         # [V13] Extract TruFor Map (if available)
+        _use_trufor_infer = os.getenv("USE_TRUFOR_INFERENCE", "true").lower() == "true"
         trufor_map = None
-        if self.trufor_extractor is not None:
-             # TruFor expects [0,1] tensor [B, 3, H, W]
-             # Use 1024x1024 resize to match training data generation and ensure consistent receptive field
+        if self.trufor_extractor is not None and _use_trufor_infer:
              tf_input = self.trufor_transform(image).unsqueeze(0).to(self.device)
-             
-             # Returns numpy [B, H, W] (1024x1024)
-             tf_np = self.trufor_extractor.extract_batch(tf_input) 
-             
+             tf_np = self.trufor_extractor.extract_batch(tf_input)
+             del tf_input  # 释放输入张量
+             if torch.cuda.is_available(): torch.cuda.empty_cache()
              if tf_np is not None:
-                 # Convert to Tensor [1, 1, H, W]
                  tf_tensor = torch.from_numpy(tf_np).unsqueeze(1).float()
-                 
-                 # [V13 Fix] Resize to 448x448 to match dataset.py input size (data_size=448)
-                 # Although model downsamples to 32x32, aligning the intermediate size is safer
                  tf_tensor = F.interpolate(tf_tensor, size=(448, 448), mode='bilinear', align_corners=False)
-                 
                  trufor_map = tf_tensor.to(self.device)
-                 # print(f"[DEBUG] TruFor Map Extracted: {trufor_map.shape}")
 
         # Extract LaRE features
         loss_map = self.lare_extractor.extract_single(image)  # [1, 4, 32, 32]
-        
+        if torch.cuda.is_available(): torch.cuda.empty_cache()  # SDXL大模型推理后清内存
+
         # Debug Print
         lm_mean = loss_map.float().mean().item()
         lm_max = loss_map.float().max().item()
@@ -340,8 +338,9 @@ class CascadeInference:
             'raw_lare_map': raw_lare_map, # Add raw LaRE map for visualization
         }
         
-        # === Stage 2: Local Zoom (if suspicious) ===
-        if global_prob >= self.threshold and loc_map is not None:
+        # === Stage 2: Local Zoom (仅在灰色地带触发) ===
+        # 级联区间：[threshold, high_threshold)，高置信度直接跳过
+        if self.threshold <= global_prob < self.high_threshold and loc_map is not None:
             # Get high-activation region
             bbox = self._get_bbox_from_locmap(loc_map, original_size, activation_threshold=0.5)
             
@@ -364,18 +363,13 @@ class CascadeInference:
 
                 # [V13] Extract TruFor for crop
                 crop_trufor = None
-                if self.trufor_extractor is not None:
-                     # [V13 Fix] Resize crop to 1024x1024 for TruFor to ensure consistent feature extraction
-                     # Previous: tf_input_crop = transforms.ToTensor()(cropped_img).unsqueeze(0).to(self.device)
+                if self.trufor_extractor is not None and _use_trufor_infer:
                      tf_input_crop = self.trufor_transform(cropped_img).unsqueeze(0).to(self.device)
-                     
                      tf_np_crop = self.trufor_extractor.extract_batch(tf_input_crop)
+                     del tf_input_crop
                      if tf_np_crop is not None:
                          tf_tensor_crop = torch.from_numpy(tf_np_crop).unsqueeze(1).float()
-                         
-                        # [V13 Fix] Resize to 448x448 to match model input expectation
                          tf_tensor_crop = F.interpolate(tf_tensor_crop, size=(448, 448), mode='bilinear', align_corners=False)
-                         
                          crop_trufor = tf_tensor_crop.to(self.device)
 
                 # Extract LaRE for cropped region

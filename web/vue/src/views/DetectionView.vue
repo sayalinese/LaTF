@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import UploadBox from '../components/detection/UploadBox.vue';
 import HeatmapSlider from '../components/detection/HeatmapSlider.vue';
 import LogicReport from '../components/detection/LogicReport.vue';
 import ModelInfo from '../components/common/ModelInfo.vue';
+import { ForensicsReportModal, type ForensicsReportData } from '../components/detection-report';
 import { fetchConfig, predictImage, explainLogicStream } from '../api';
 import type { PredictResponse, ConfigResponse } from '../types/api';
 
@@ -18,6 +19,11 @@ const showVlmPanel = ref(false);
 const isGeneratingLogic = ref(false);
 const logicReportResult = ref<string | null>(null);
 const logicErrorMsg = ref<string | null>(null);
+
+// Full Report State
+const showFullReport = ref(false);
+const activeReportData = ref<ForensicsReportData | null>(null);
+const truforHeatmapData = ref<string | null>(null);
 
 // Config Status
 const sdkConfig = ref<ConfigResponse | null>(null);
@@ -68,9 +74,15 @@ const handlePredict = async () => {
     logicReportResult.value = null;
     logicErrorMsg.value = null;
     showVlmPanel.value = false;
+    showFullReport.value = false;
+    truforHeatmapData.value = null;
     
     try {
         result.value = await predictImage(currentFile.value);
+        // 从debug信息中提取TruFor热力图（如果有的话）
+        if (result.value.debug?.trufor_heatmap) {
+            truforHeatmapData.value = result.value.debug.trufor_heatmap;
+        }
     } catch(e: any) {
         errorMsg.value = e.response?.data?.error || e.message || '检测异常';
     } finally {
@@ -103,6 +115,11 @@ const handleExplainLogic = async () => {
         await explainLogicStream(base64Data, isFake, (chunk) => {
             logicReportResult.value += chunk;
         });
+        
+        // 如果完整报告已打开，刷新报告数据
+        if (showFullReport.value) {
+            // 报告组件会响应logicReportResult的变化
+        }
     } catch(e: any) {
         logicErrorMsg.value = e.response?.data?.error || e.message || '生成分析报告失败，确保 Ollama 已启动。';
         if (!logicReportResult.value) {
@@ -111,6 +128,42 @@ const handleExplainLogic = async () => {
     } finally {
         isGeneratingLogic.value = false;
     }
+};
+
+// 打开完整报告页面
+const openFullReport = () => {
+    if (!result.value || !previewUrl.value) return;
+    
+    // 生成报告数据
+    const reportId = `FA-${new Date().getFullYear()}${String(new Date().getMonth()+1).padStart(2,'0')}${String(new Date().getDate()).padStart(2,'0')}-${Math.floor(Math.random()*10000).toString().padStart(4,'0')}`;
+    
+    activeReportData.value = {
+      reportId,
+      timestamp: new Date().toISOString(),
+      targetImageUrl: previewUrl.value,
+      aiDetection: {
+        isFake: result.value.class_idx === 1,
+        confidence: result.value.confidence,
+        probabilities: result.value.probabilitiesObj || {
+          "Real": 1 - result.value.confidence,
+          "AI Generated": result.value.confidence
+        },
+        heatmapBase64: result.value.heatmap
+      },
+      vlReport: logicReportResult.value || '*(未生成 Qwen-VL 分析)*'
+    };
+    
+    showFullReport.value = true;
+    
+    // 如果VLM报告还没生成，先打开VLM面板
+    if (!logicReportResult.value && !isGeneratingLogic.value) {
+        handleExplainLogic();
+    }
+};
+
+// 关闭完整报告页面
+const closeFullReport = () => {
+    showFullReport.value = false;
 };
 </script>
 
@@ -230,9 +283,12 @@ const handleExplainLogic = async () => {
                 </div>
                 <div class="vlm-section-body">
                   <p class="vlm-desc">启用多模态大模型(Qwen-VL)结合特征热力图进行深度物理规律层面的逻辑诊断。此过程可能需要几十秒时间。</p>
-                  <button class="vlm-btn" @click="handleExplainLogic" :disabled="isGeneratingLogic" v-if="!showVlmPanel">
-                    <i class="fa-solid fa-microscope"></i> 启动深度多模态诊断
-                  </button>
+                  <div class="action-buttons">
+                    <button class="vlm-btn" @click="handleExplainLogic" :disabled="isGeneratingLogic" v-if="!showVlmPanel">
+                      <i class="fa-solid fa-microscope"></i> 启动深度多模态诊断
+                    </button>
+
+                  </div>
                 </div>
               </div>
             </div>
@@ -262,6 +318,14 @@ const handleExplainLogic = async () => {
           </section>
         </transition>
       </main>
+
+      <Teleport to="body">
+        <ForensicsReportModal
+          v-if="showFullReport && activeReportData"
+          :report-data="activeReportData"
+          @close="closeFullReport"
+        />
+      </Teleport>
     </div>
 
     <ModelInfo :config="sdkConfig" :loading="configLoading" :error="configError" @refresh="loadConfig" />
@@ -645,4 +709,117 @@ const handleExplainLogic = async () => {
 
 .vlm-slide-enter-active { transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
 .vlm-slide-enter-from { opacity: 0; transform: translateY(-10px); max-height: 0; padding-top: 0; padding-bottom: 0; overflow: hidden; margin-top: -20px; }
+
+/* ── 报告按钮 ── */
+.action-buttons {
+  display: flex;
+  gap: 12px;
+}
+
+.report-btn {
+  flex: 1;
+  padding: 12px 20px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  background: linear-gradient(135deg, #f59e0b, #eab308);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 4px 15px rgba(245, 158, 11, 0.3);
+}
+
+.report-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(245, 158, 11, 0.4);
+  filter: brightness(1.1);
+}
+
+.report-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── 报告模态框 ── */
+.report-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  z-index: 9999;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 40px 20px;
+  animation: fadeInOverlay 0.3s ease;
+}
+
+@keyframes fadeInOverlay {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.report-modal-container {
+  position: relative;
+  width: 100%;
+  max-width: 1200px;
+  animation: slideUpReport 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes slideUpReport {
+  from {
+    opacity: 0;
+    transform: translateY(30px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.report-modal-close {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  font-size: 1.2rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  z-index: 10000;
+  backdrop-filter: blur(4px);
+}
+
+.report-modal-close:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.1);
+}
+
+/* ── 适配小屏幕 ── */
+@media (max-width: 768px) {
+  .report-modal-overlay {
+    padding: 20px 10px;
+  }
+  
+  .action-buttons {
+    flex-direction: column;
+  }
+}
 </style>

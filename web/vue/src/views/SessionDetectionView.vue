@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router';
 import { fetchSessions, fetchSessionMessages, sendTextMessage, sendImageMessage, detectMessage, explainLogicStream, createSession, updateSession, deleteSession, joinSession } from '../api';
 import { useUserStore } from '../stores/user';
 import FloatingAssistant from '../components/session/FloatingAssistant.vue';
-import ForensicsReport from '../components/detection/ForensicsReport.vue';
+import { ForensicsReportModal, type ForensicsReportData } from '../components/detection-report';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 
@@ -42,6 +42,19 @@ const joinCode = ref('');
 const joinInputEl = ref<HTMLInputElement | null>(null);
 const joinError = ref('');
 
+// 创建会话 - 订单信息
+const newOrderId = ref('');
+const newProductName = ref('');
+const newProductPrice = ref('');
+const newProductImage = ref('');
+
+// 编辑订单信息 Modal
+const showOrderEditModal = ref(false);
+const editOrderId = ref('');
+const editProductName = ref('');
+const editProductPrice = ref('');
+const editProductImage = ref('');
+
 // AI 检测结果数据
 const detectResult = ref<any>(null);
 const detectingMsgId = ref<string | null>(null);
@@ -56,20 +69,32 @@ const stepReport = ref<'waiting' | 'active' | 'done'>('waiting');
 
 // 定责报告状态
 const showForensicsReport = ref(false);
-const forensicsReportData = ref<{
-    sessionInfo: {
-        id: string;
-        title: string;
-        buyerId: string;
-        sellerId: string;
-        buyerName?: string;
-        sellerName?: string;
-    };
-    messages: any[];
-    detectedMessages: any[];
-} | null>(null);
-
+const activeReportData = ref<ForensicsReportData | null>(null);
+  const isGeneratingReport = ref(false);
 const isFake = computed(() => detectResult.value && detectResult.value.class_name !== 'Real');
+
+  const detectingMsg = computed(() => {
+    if (!detectingMsgId.value || !messages.value) return null;
+    return messages.value.find((m: any) => m.id === detectingMsgId.value);
+  });
+
+  const detectingMsgIsOpponent = computed(() => {
+    if (!detectingMsg.value || !userState.id) return false;
+    return detectingMsg.value.sender_id !== userState.id;
+  });
+
+  const detectingMsgSenderName = computed(() => {
+    if (!detectingMsg.value) return '';
+    return detectingMsg.value.name || '';
+  });
+
+const formatMsgTime = (isoStr: string) => {
+  const d = new Date(isoStr);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const time = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return isToday ? time : `${d.getMonth() + 1}/${d.getDate()} ${time}`;
+};
 
 const scrollToBottom = async () => {
   await nextTick();
@@ -220,7 +245,12 @@ const confirmAddSession = async () => {
   const title = newSessionTitle.value.trim();
   if (!title) return;
   try {
-    const res = await createSession(title);
+    const orderInfo: any = {};
+    if (newOrderId.value.trim()) orderInfo.order_id = newOrderId.value.trim();
+    if (newProductName.value.trim()) orderInfo.product_name = newProductName.value.trim();
+    if (newProductPrice.value.trim()) orderInfo.product_price = newProductPrice.value.trim();
+    if (newProductImage.value.trim()) orderInfo.product_image = newProductImage.value.trim();
+    const res = await createSession(title, 'taobao', Object.keys(orderInfo).length ? orderInfo : undefined);
     if (res.success) {
       sessions.value.unshift(res.session);
       activeSession.value = res.session;
@@ -231,6 +261,10 @@ const confirmAddSession = async () => {
     }
   } catch (e) { console.error('创建会话失败:', e); }
   newSessionTitle.value = '';
+  newOrderId.value = '';
+  newProductName.value = '';
+  newProductPrice.value = '';
+  newProductImage.value = '';
   showAddSession.value = false;
 };
 
@@ -289,7 +323,7 @@ const confirmRename = async () => {
   const title = renameTitle.value.trim();
   if (!title || !activeSession.value) { isRenamingSession.value = false; return; }
   try {
-    const res = await updateSession(activeSession.value.id, title);
+    const res = await updateSession(activeSession.value.id, { topic_name: title });
     if (res.success) {
       const idx = sessions.value.findIndex((s: any) => s.id === activeSession.value.id);
       if (idx !== -1) sessions.value[idx].title = title;
@@ -313,6 +347,36 @@ const handleDeleteSession = async () => {
       if (activeSession.value) await loadMessages(activeSession.value.id);
     }
   } catch (e) { console.error('删除会话失败:', e); }
+};
+
+// 编辑订单信息
+const openOrderEditModal = () => {
+  if (!activeSession.value) return;
+  showSessionMenu.value = false;
+  editOrderId.value = activeSession.value.order_id || '';
+  editProductName.value = activeSession.value.product_name || '';
+  editProductPrice.value = activeSession.value.product_price || '';
+  editProductImage.value = activeSession.value.product_image || '';
+  showOrderEditModal.value = true;
+};
+
+const confirmOrderEdit = async () => {
+  if (!activeSession.value) return;
+  try {
+    const res = await updateSession(activeSession.value.id, {
+      order_id: editOrderId.value.trim(),
+      product_name: editProductName.value.trim(),
+      product_price: editProductPrice.value.trim(),
+      product_image: editProductImage.value.trim(),
+    });
+    if (res.success) {
+      const updated = { ...activeSession.value, ...res.session };
+      activeSession.value = updated;
+      const idx = sessions.value.findIndex((s: any) => s.id === updated.id);
+      if (idx !== -1) sessions.value[idx] = updated;
+    }
+  } catch (e) { console.error('更新订单信息失败:', e); }
+  showOrderEditModal.value = false;
 };
 
 const requestAiDetection = async (msgId: string) => {
@@ -399,80 +463,116 @@ const startVlStream = async () => {
 };
 
 // 打开定责报告
-const openForensicsReport = () => {
-  if (!activeSession.value) return;
+  const openForensicsReport = async () => {
+    if (!activeSession.value || !detectResult.value || !detectingMsgId.value) return;
 
-  // 从当前消息中收集已鉴定的图片
-  const detectedMsgs = messages.value
-    .filter((m: any) => m.type === 'image' && m.hasBeenDetected)
-    .map((m: any) => {
-      return {
-        id: m.id,
-        content: m.content,
-        sender: m.name,
-        role: m.role,
-        senderId: m.sender_id,
-        detectData: m.detectData || m.ai_detect_data || (detectingMsgId.value === m.id ? detectResult.value : null),
-        vlReport: detectingMsgId.value === m.id ? vlReport.value : null
-      };
-    });
+    const msg = messages.value.find((m: any) => m.id === detectingMsgId.value);
+    if (!msg) return;
 
-  // 如果当前有检测结果但消息中没有，确保添加到列表
-  if (detectResult.value && detectingMsgId.value) {
-    const existingMsg = detectedMsgs.find(m => m.id === detectingMsgId.value);
-    if (!existingMsg) {
-      const msg = messages.value.find((m: any) => m.id === detectingMsgId.value);
-      if (msg) {
-        detectedMsgs.push({
-          id: msg.id,
-          content: msg.content,
-          sender: msg.name,
-          role: msg.role,
-          senderId: msg.sender_id,
-          detectData: detectResult.value,
-          vlReport: vlReport.value
-        });
+    let role: 'buyer' | 'seller' | 'unknown' = 'unknown';
+    if (msg.sender_id === activeSession.value.buyer_id) role = 'buyer';
+    else if (msg.sender_id === activeSession.value.seller_id) role = 'seller';
+
+    const reportId = Math.random().toString();
+
+    const isFakeValue = detectResult.value.class_name !== 'Real';
+
+    isGeneratingReport.value = true;
+
+    try {
+      const response = await fetch('/api/generate_comprehensive_report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: activeSession.value.id,
+          image_id: msg.id,
+          is_fake: isFakeValue,
+          fake_reason: vlReport.value || ''
+        })
+      });
+      if (!response.ok) {
+        console.error('报告API返回错误:', response.status, response.statusText);
+        throw new Error(`API error: ${response.status}`);
       }
+      const resData = await response.json();
+      console.log('LLM报告返回数据:', resData);
+      const extraData = resData.data || {};
+
+      activeReportData.value = {
+        reportId,
+        timestamp: new Date().toISOString(),
+        platform: activeSession.value.platform || 'taobao',
+        targetImageUrl: msg.content,
+        sessionContext: {
+          sessionId: activeSession.value.id,
+          buyerName: '买家(匿名)',
+          sellerName: '卖家(匿名)',
+          senderRole: role
+        },
+        aiDetection: {
+          isFake: isFakeValue,
+          confidence: detectResult.value.confidence || 0,
+          probabilities: detectResult.value.probabilities,
+          heatmapBase64: detectResult.value.heatmap
+        },
+        vlReport: detectResult.value.vl_report || vlReport.value || '',
+        riskyStatements: extraData.riskyStatements || [],
+        ruleViolations: extraData.ruleViolations || [],
+        actionSuggestions: extraData.actionSuggestions || [],
+        chatLog: extraData.chatLog || []
+      };
+      showForensicsReport.value = true;
+    } catch (e) {
+      console.error('获取定责报告失败:', e);
+      activeReportData.value = {
+        reportId,
+        timestamp: new Date().toISOString(),
+        platform: activeSession.value.platform || 'taobao',
+        targetImageUrl: msg.content,
+        sessionContext: {
+          sessionId: activeSession.value.id,
+          buyerName: '买家(匿名)',
+          sellerName: '卖家(匿名)',
+          senderRole: role
+        },
+        aiDetection: {
+          isFake: isFakeValue,
+          confidence: detectResult.value.confidence || 0,
+          probabilities: detectResult.value.probabilities,
+          heatmapBase64: detectResult.value.heatmap
+        },
+        vlReport: detectResult.value.vl_report || vlReport.value || '',
+        riskyStatements: [],
+        ruleViolations: [],
+        actionSuggestions: [],
+        chatLog: []
+      };
+      showForensicsReport.value = true;
+    } finally {
+      isGeneratingReport.value = false;
     }
-  }
-
-  // 获取买家和卖家信息
-  const session = sessions.value.find((s: any) => s.id === activeSession.value?.id);
-
-  forensicsReportData.value = {
-    sessionInfo: {
-      id: activeSession.value.id,
-      title: activeSession.value.title,
-      buyerId: activeSession.value.buyer_id || session?.buyer_id || '',
-      sellerId: activeSession.value.seller_id || session?.seller_id || '',
-    },
-    messages: messages.value,
-    detectedMessages: detectedMsgs
   };
 
-  showForensicsReport.value = true;
-};
+  // 关闭定责报告
+  const closeForensicsReport = () => {
+    showForensicsReport.value = false;
+  };
 
-// 关闭定责报告
-const closeForensicsReport = () => {
-  showForensicsReport.value = false;
-};
-
-const handleSendText = async () => {
-  if (!inputText.value.trim() || !activeSession.value) return;
-  try {
-    const res = await sendTextMessage(activeSession.value.id, inputText.value.trim());
-    if (res.success) {
-      messages.value.push(res.message);
-      inputText.value = '';
-      scrollToBottom();
+  const handleSendText = async () => {
+    if (!inputText.value.trim() || !activeSession.value) return;
+    try {
+      const res = await sendTextMessage(activeSession.value.id, inputText.value.trim());
+      if (res.success) {
+        messages.value.push(res.message);
+        inputText.value = '';
+        scrollToBottom();
+      }
+    } catch (e) {
+      console.error("发送消息失败:", e);
     }
-  } catch (e) {
-    console.error("发送消息失败:", e);
-  }
-};
+  };
 
-const triggerImageUpload = () => {
+  const triggerImageUpload = () => {
   fileInput.value?.click();
 };
 
@@ -495,8 +595,10 @@ const handleImageUpload = async (event: Event) => {
 </script>
 
 <template>
-  <div class="page-wrapper">
-    <div class="chat-container">
+  <!-- Vue Router Transition 要求组件只能有一个根节点，所以我们在最外层加一个大 div -->
+  <div class="session-root">
+    <div class="page-wrapper">
+      <div class="chat-container">
       
       <!-- 左侧：纠纷会话列表 -->
       <div :class="['sidebar', { collapsed: sidebarCollapsed }]">
@@ -519,10 +621,16 @@ const handleImageUpload = async (event: Event) => {
           <button class="add-session-cancel" @click="showJoinInput = false" title="取消"><i class="fa-solid fa-xmark"></i></button>
         </div>
         <p v-if="joinError" class="join-error"><i class="fa-solid fa-triangle-exclamation"></i> {{ joinError }}</p>
-        <div v-if="showAddSession" class="add-session-row">
-          <input ref="addSessionInputEl" type="text" v-model="newSessionTitle" placeholder="输入纠纷标题..." @keyup.enter="confirmAddSession" @keyup.esc="showAddSession = false" />
-          <button class="add-session-confirm" @click="confirmAddSession" title="确认"><i class="fa-solid fa-check"></i></button>
-          <button class="add-session-cancel" @click="showAddSession = false" title="取消"><i class="fa-solid fa-xmark"></i></button>
+        <div v-if="showAddSession" class="add-session-row add-session-form">
+          <input ref="addSessionInputEl" type="text" v-model="newSessionTitle" placeholder="纠纷标题（必填）" @keyup.esc="showAddSession = false" />
+          <input type="text" v-model="newOrderId" placeholder="订单号" />
+          <input type="text" v-model="newProductName" placeholder="商品名称" />
+          <input type="text" v-model="newProductPrice" placeholder="商品金额" />
+          <input type="text" v-model="newProductImage" placeholder="商品图片 URL" />
+          <div class="add-session-actions">
+            <button class="add-session-confirm" @click="confirmAddSession" title="确认创建"><i class="fa-solid fa-check"></i> 创建</button>
+            <button class="add-session-cancel" @click="showAddSession = false" title="取消"><i class="fa-solid fa-xmark"></i></button>
+          </div>
         </div>
         <div class="search-bar">
           <i class="fa-solid fa-search"></i>
@@ -605,14 +713,15 @@ const handleImageUpload = async (event: Event) => {
               <button class="icon-btn" @click="showSessionMenu = !showSessionMenu"><i class="fa-solid fa-ellipsis-vertical"></i></button>
               <div v-if="showSessionMenu" class="session-menu">
                 <button class="menu-item" @click="startRenameSession"><i class="fa-solid fa-pen"></i> 编辑标题</button>
+                <button class="menu-item" @click="openOrderEditModal"><i class="fa-solid fa-box"></i> 订单信息</button>
                 <button class="menu-item danger" @click="handleDeleteSession"><i class="fa-solid fa-trash"></i> 删除会话</button>
               </div>
             </div>
           </div>
         </div>
         
-        <div class="message-list" ref="messageListEl">
-          <div class="date-divider"><span>今天 09:58</span></div>
+        <div class="chat-body">
+          <div class="message-list" ref="messageListEl">
           
           <div 
             v-for="msg in messages" 
@@ -631,7 +740,7 @@ const handleImageUpload = async (event: Event) => {
                 </div>
               </div>
               <div class="message-content-wrapper">
-                <div class="sender-name">{{ msg.name }}</div>
+                <div class="sender-name">{{ msg.name }} <span class="msg-time" v-if="msg.created_at">{{ formatMsgTime(msg.created_at) }}</span></div>
                 
                 <!-- 文本消息 -->
                 <div class="message-bubble" v-if="msg.type === 'text'">{{ msg.content }}</div>
@@ -656,6 +765,9 @@ const handleImageUpload = async (event: Event) => {
           </div>
         </div>
 
+        </div>
+
+      <!-- 输入框在 chat-body 之外，保持底部 -->
         <div class="chat-input-area">
           <input type="file" ref="fileInput" accept="image/*" style="display:none" @change="handleImageUpload" />
           <button class="upload-btn" title="上传证据图片" @click="triggerImageUpload"><i class="fa-solid fa-image"></i></button>
@@ -745,36 +857,20 @@ const handleImageUpload = async (event: Event) => {
                   </div>
                 </div>
 
-                <!-- VL 报告区 -->
-                <div class="panel-section">
-                  <div class="section-title">
-                    <i class="fa-solid fa-scroll"></i> 多模态分析报告
-                    <button v-if="!vlReport && !vlStreaming && !detectResult.vl_report" class="vl-trigger-btn" @click="startVlStream">
-                      <i class="fa-solid fa-brain"></i> 生成 VL 报告
-                    </button>
-                  </div>
-                  <div v-if="vlReport || vlStreaming" class="logic-report">
-                    <div class="report-block vl-block">
-                      <span class="report-tag visual">Qwen-VL</span>
-                      <div class="vl-text markdown-body" v-html="renderMd(vlReport)"></div>
-                      <span v-if="vlStreaming" class="cursor-blink">|</span>
-                    </div>
-                  </div>
-                  <div v-else-if="detectResult.vl_report" class="logic-report">
-                    <div class="report-block vl-block">
-                      <span class="report-tag visual">Qwen-VL</span>
-                      <div class="vl-text markdown-body" v-html="renderMd(detectResult.vl_report)"></div>
-                    </div>
-                  </div>
-                  <div v-else class="vl-placeholder">
-                    <p>点击上方按钮调用 Qwen-VL 生成详细多模态分析报告</p>
-                  </div>
-                </div>
-                
                 <div class="verdict-box">
                   <div class="verdict-title"><i class="fa-solid fa-gavel"></i> 判决建议</div>
-                  <p v-if="isFake">该图片被 AI 模型高置信度判定为 <strong>AIGC 生成图像</strong>，建议支持买家诉求。</p>
-                  <p v-else>该图片未检出明显伪造痕迹，被判定为 <strong>真实图像</strong>。</p>
+                  <p v-if="isFake && detectingMsgIsOpponent">该图片由<strong>「对方 <span v-if="detectingMsgSenderName">({{ detectingMsgSenderName }})</span>」</strong>提供，AI 高置信度判定为 <strong>AIGC 生成图像</strong>，虚假证据属实，建议支持您的维权诉求。</p>
+                  <p v-else-if="isFake && !detectingMsgIsOpponent">该图片由<strong>「我方 <span v-if="detectingMsgSenderName">({{ detectingMsgSenderName }})</span>」</strong>提供，AI 判定为 <strong>AIGC 生成图像</strong>，请核实该图片来源，如有误判请申诉。</p>
+                  <p v-else>该图片由<strong>「{{ detectingMsgIsOpponent ? "对方" : "我方" }} <span v-if="detectingMsgSenderName">({{ detectingMsgSenderName }})</span>」</strong>提供，未检出明显伪造痕迹，被判定为 <strong>真实图像</strong>。</p>
+                  
+                  <button class="export-report-btn" :disabled="isGeneratingReport" @click="openForensicsReport" style="margin-top: 15px; width: 100%; border: none; background: #3b82f6; color: white; padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; gap: 8px; transition: background 0.2s;">
+                      <template v-if="!isGeneratingReport">
+                        <i class="fa-solid fa-file-pdf"></i> 生成完整定责报告
+                      </template>
+                      <template v-else>
+                        <i class="fa-solid fa-spinner fa-spin"></i> 正在分析语料及规则...
+                      </template>
+                  </button>
                 </div>
             </div>
 
@@ -790,11 +886,10 @@ const handleImageUpload = async (event: Event) => {
             </div>
           </div>
         </div>
-      </transition>
+        </transition>
+
     </div>
   </div>
-
-  <!-- 邀请码弹窗 -->
   <teleport to="body">
     <transition name="fade">
       <div v-if="showInviteModal" class="invite-mask" @click.self="showInviteModal = false">
@@ -817,31 +912,49 @@ const handleImageUpload = async (event: Event) => {
     </transition>
   </teleport>
 
+  <!-- 编辑订单信息弹窗 -->
+  <teleport to="body">
+    <transition name="fade">
+      <div v-if="showOrderEditModal" class="modal-backdrop" @click.self="showOrderEditModal = false">
+        <div class="order-edit-modal">
+          <h3><i class="fa-solid fa-box"></i> 编辑订单信息</h3>
+          <div class="order-form">
+            <label>订单号</label>
+            <input type="text" v-model="editOrderId" placeholder="输入订单号" />
+            <label>商品名称</label>
+            <input type="text" v-model="editProductName" placeholder="输入商品名称" />
+            <label>商品金额</label>
+            <input type="text" v-model="editProductPrice" placeholder="例如 99.00" />
+            <label>商品图片 URL</label>
+            <input type="text" v-model="editProductImage" placeholder="https://..." />
+            <div v-if="editProductImage" class="product-preview">
+              <img :src="editProductImage" alt="商品预览" @error="($event.target as HTMLImageElement).style.display='none'" />
+            </div>
+          </div>
+          <div class="order-edit-actions">
+            <button class="order-save-btn" @click="confirmOrderEdit"><i class="fa-solid fa-check"></i> 保存</button>
+            <button class="order-cancel-btn" @click="showOrderEditModal = false"><i class="fa-solid fa-xmark"></i> 取消</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+  </teleport>
+
   <!-- 悬浮 AI 小助手 -->
   <FloatingAssistant
     :session-id="activeSession ? activeSession.id : null"
     :session-title="activeSession ? activeSession.title : ''"
   />
 
-  <!-- 定责报告模态框 -->
+  <!-- 卷宗式定责报告模态框 -->
   <Teleport to="body">
-    <div class="forensics-report-overlay" v-if="showForensicsReport" @click.self="closeForensicsReport">
-      <div class="forensics-report-container">
-        <button class="forensics-report-close" @click="closeForensicsReport">
-          <i class="fa-solid fa-xmark"></i>
-        </button>
-        <ForensicsReport
-          v-if="forensicsReportData"
-          :session-info="forensicsReportData.sessionInfo"
-          :detected-messages="forensicsReportData.detectedMessages"
-          :all-messages="forensicsReportData.messages"
-          :current-detect-result="detectResult"
-          :current-vl-report="vlReport"
-          @close="closeForensicsReport"
-        />
-      </div>
-    </div>
+    <ForensicsReportModal
+      v-if="showForensicsReport && activeReportData"
+      :report-data="activeReportData"
+      @close="closeForensicsReport"
+    />
   </Teleport>
+  </div>
 </template>
 
 <style scoped>
@@ -1090,7 +1203,20 @@ const handleImageUpload = async (event: Event) => {
 .chat-empty-state h3 { font-size: 1.15rem; color: var(--text-main); margin: 0; }
 .chat-empty-state p { font-size: 0.9rem; line-height: 1.7; }
 
-/* 中间聊天区 */
+/* 中间层：消息列表 + AI 面板并排，不包含输入框 */
+.chat-body {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  min-height: 0;
+}
+.chat-body .message-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* 中间联天 */
 .chat-main {
   flex: 1;
   display: flex;
@@ -1178,6 +1304,7 @@ const handleImageUpload = async (event: Event) => {
 .message-content-wrapper { display: flex; flex-direction: column; max-width: calc(100% - 56px); }
 .self .message-content-wrapper { align-items: flex-end; }
 .sender-name { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 6px; padding: 0 4px;}
+.msg-time { font-size: 0.7rem; color: #94a3b8; margin-left: 8px; font-weight: normal; }
 
 .message-bubble {
   background: var(--card-bg);
@@ -1317,6 +1444,11 @@ const handleImageUpload = async (event: Event) => {
   display: flex; flex-direction: column;
   z-index: 20;
   box-shadow: -10px 0 30px rgba(0,0,0,0.2);
+  /* 底部留出输入框高度，与消息列表底部齐平 */
+  margin-bottom: 88px;
+  /* 底部渐隐过渡，不增加高度 */
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 48px), transparent 100%);
+  mask-image: linear-gradient(to bottom, black calc(100% - 48px), transparent 100%);
 }
 .ai-header {
   padding: 24px; 
@@ -1485,7 +1617,7 @@ const handleImageUpload = async (event: Event) => {
 }
 .verdict-title { color: #fbbf24; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 1.1rem;}
 .verdict-box p { color: var(--text-main); font-size: 0.95rem; margin-bottom: 16px; line-height: 1.5; }
-.verdict-box p strong { color: #ef4444; font-size: 1.1em;}
+.verdict-box p strong { color: var(--text-main); font-size: 1.0em; font-weight: 700; }
 .apply-verdict-btn {
   width: 100%; background: linear-gradient(135deg, #f59e0b, #d97706); color: white;
   border: none; padding: 12px; border-radius: 10px; font-weight: 600; font-size: 1rem;
@@ -1651,5 +1783,71 @@ const handleImageUpload = async (event: Event) => {
 .forensics-report-close:hover {
   background: #e5e7eb;
 }
+.export-report-btn:disabled { background: #94a3b8 !important; cursor: not-allowed !important; }
+
+/* 新建会话表单（多字段） */
+.add-session-form {
+  flex-direction: column; align-items: stretch; gap: 8px; padding: 12px 20px 14px;
+}
+.add-session-form input {
+  width: 100%; box-sizing: border-box;
+}
+.add-session-actions {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 2px;
+}
+.add-session-actions .add-session-confirm {
+  width: auto; padding: 6px 16px; font-size: 0.85rem; gap: 4px; display: flex; align-items: center;
+}
+
+/* 订单信息编辑弹窗 */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(4px);
+}
+.order-edit-modal {
+  background: var(--panel-bg); border: 1px solid var(--border-color-light);
+  border-radius: 20px; padding: 28px 32px; width: min(440px, 90vw);
+  box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+  animation: fadeIn 0.2s ease;
+}
+.order-edit-modal h3 {
+  margin: 0 0 18px; font-size: 1.1rem; color: var(--text-main);
+  display: flex; align-items: center; gap: 10px;
+}
+.order-edit-modal h3 i { color: #60a5fa; }
+.order-form {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.order-form label {
+  font-size: 0.82rem; color: var(--text-muted); font-weight: 500; margin-bottom: -4px;
+}
+.order-form input {
+  background: var(--border-color-light); border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 8px; padding: 9px 12px; color: var(--text-main); font-size: 0.9rem; outline: none;
+  transition: border-color 0.15s;
+}
+.order-form input:focus { border-color: rgba(59, 130, 246, 0.7); }
+.product-preview {
+  max-width: 120px; margin-top: 4px; border-radius: 8px; overflow: hidden;
+  border: 1px solid var(--border-color-light);
+}
+.product-preview img { width: 100%; display: block; }
+.order-edit-actions {
+  display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px;
+}
+.order-save-btn {
+  background: linear-gradient(135deg, #3b82f6, #6366f1); color: white;
+  border: none; padding: 9px 22px; border-radius: 10px; font-weight: 600; font-size: 0.9rem;
+  cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s;
+}
+.order-save-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.order-cancel-btn {
+  background: var(--border-color-light); color: var(--text-muted);
+  border: none; padding: 9px 18px; border-radius: 10px; font-size: 0.9rem;
+  cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.15s;
+}
+.order-cancel-btn:hover { background: var(--border-color); }
 </style>
 

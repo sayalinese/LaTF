@@ -186,13 +186,13 @@ export const detectMessage = async (messageId: string, useVl = false) => {
   return res.data;
 };
 
-export const createSession = async (topicName: string, platform: string = 'taobao') => {
-  const res = await apiClient.post('/sessions', { topic_name: topicName, platform });
+export const createSession = async (topicName: string, platform: string = 'taobao', orderInfo?: { order_id?: string; product_name?: string; product_price?: string; product_image?: string }) => {
+  const res = await apiClient.post('/sessions', { topic_name: topicName, platform, ...orderInfo });
   return res.data;
 };
 
-export const updateSession = async (sessionId: string, topicName: string) => {
-  const res = await apiClient.put(`/sessions/${sessionId}`, { topic_name: topicName });
+export const updateSession = async (sessionId: string, data: Record<string, any>) => {
+  const res = await apiClient.put(`/sessions/${sessionId}`, data);
   return res.data;
 };
 

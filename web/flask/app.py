@@ -80,6 +80,16 @@ except ImportError:
     def build_rag_system_prompt(base, docs, platform_hint=None):  # type: ignore
         return base
 
+# LLM 风险定责审查模块
+try:
+    from flask_service.vllm.llm import generate_forensics_report_data
+    _LLM_REPORT_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARN] LLM report module not available: {e}")
+    _LLM_REPORT_AVAILABLE = False
+    def generate_forensics_report_data(*args, **kwargs):
+        return {"riskyStatements": [], "ruleViolations": []}
+
 # 初始化统一的预测管理器
 LAFT_MANAGER = LaFTManager(project_root=str(PROJECT_ROOT))
 
@@ -414,6 +424,10 @@ def _session_to_dict(s):
         "platform": s.platform or 'taobao',
         "buyer_id": s.buyer_id or '',
         "seller_id": s.seller_id or '',
+        "order_id": s.order_id or '',
+        "product_name": s.product_name or '',
+        "product_price": s.product_price or '',
+        "product_image": s.product_image or '',
         "time": s.created_at.strftime('%H:%M') if s.created_at else ''
     }
 
@@ -457,6 +471,11 @@ def create_session():
     if platform not in ['taobao', 'xianyu', 'jd', 'pdd']:
         platform = 'taobao'
     s = DisputeSession(topic_name=topic_name, platform=platform, buyer_id=current_user_id, status='open')
+    # 订单/商品信息（可选）
+    s.order_id = (data.get('order_id') or '').strip() or None
+    s.product_name = (data.get('product_name') or '').strip() or None
+    s.product_price = (data.get('product_price') or '').strip() or None
+    s.product_image = (data.get('product_image') or '').strip() or None
     db.session.add(s)
     db.session.commit()
     return jsonify({"success": True, "session": _session_to_dict(s)})
@@ -475,8 +494,17 @@ def update_session(session_id):
         s.topic_name = topic_name
     if platform and platform in ['taobao', 'xianyu', 'jd', 'pdd']:
         s.platform = platform
+    # 订单/商品信息编辑
+    if 'order_id' in data:
+        s.order_id = (data['order_id'] or '').strip() or None
+    if 'product_name' in data:
+        s.product_name = (data['product_name'] or '').strip() or None
+    if 'product_price' in data:
+        s.product_price = (data['product_price'] or '').strip() or None
+    if 'product_image' in data:
+        s.product_image = (data['product_image'] or '').strip() or None
     db.session.commit()
-    return jsonify({"success": True, "title": s.topic_name, "platform": s.platform})
+    return jsonify({"success": True, "session": _session_to_dict(s)})
 
 @app.route('/sessions/<session_id>', methods=['DELETE'])
 def delete_session(session_id):
@@ -542,7 +570,8 @@ def get_session_messages(session_id):
             "avatar": sender_avatar,
             "content": m.content,
             "type": m.content_type,
-            "hasBeenDetected": True if m.ai_detect_data else False
+            "hasBeenDetected": True if m.ai_detect_data else False,
+            "created_at": m.created_at.isoformat() if m.created_at else None
         })
     return jsonify({"success": True, "messages": res})
 
@@ -801,6 +830,74 @@ def assistant_chat(session_id):
             yield f"\n[AI 服务请求失败]: {str(exc)}\n"
 
     return Response(stream_with_context(generate()), mimetype='text/plain')
+
+
+@app.route("/api/generate_comprehensive_report", methods=["POST"])
+@app.route("/generate_comprehensive_report", methods=["POST"])
+def api_generate_comprehensive_report():
+    data = request.json
+    session_id = data.get("session_id")
+    # image_id = data.get("image_id")
+    is_fake_str = data.get("is_fake", "true") 
+    is_fake = is_fake_str.lower() == "true" if isinstance(is_fake_str, str) else bool(is_fake_str)
+    fake_reason = data.get("fake_reason", "")
+    
+    # 1. Provide chat history
+    messages = Message.query.filter_by(session_id=session_id).order_by(Message.created_at.asc()).all()
+    session = DisputeSession.query.get(session_id)
+    platform = session.platform if session else "taobao"
+
+    chat_context_lines = []
+    for msg in messages:
+        role_label = "买家" if msg.sender_role == "buyer" else "商家"
+        side_label = "【我方】" if msg.sender_role == "buyer" else "【对方】"
+        header = f"{side_label}({role_label})"
+        if msg.content_type == "text":
+            chat_context_lines.append(f"{header}: {msg.content}")
+        elif msg.content_type == "image":
+            chat_context_lines.append(f"{header}: [发送了一张图片]")
+    full_chat = "\n".join(chat_context_lines)
+    
+    # 2. Get RAG info
+    rules_text = ""
+    if _RAG_AVAILABLE:
+        try:
+            retriever = get_retriever()
+            if retriever is not None:
+                rag_docs = retriever.retrieve(f"用户在{platform}平台上发生了纠纷，对方声称商品没问题或平台不管。有哪些相关规定？", platform)
+                rules_text = "\n".join([r.get("content", "") for r in rag_docs])
+        except Exception as e:
+            print(f"[WARN] RAG retrieval failed: {e}")
+    
+    # 3. Call text LLM for rules and risky statements
+    print(f"[INFO] 综合报告: session={session_id}, chat_lines={len(chat_context_lines)}, rules_len={len(rules_text)}, is_fake={is_fake}")
+    try:
+        report_data = generate_forensics_report_data(full_chat, rules_text, is_fake, fake_reason)
+        print(f"[INFO] LLM返回: riskyStatements={len(report_data.get('riskyStatements', []))}, ruleViolations={len(report_data.get('ruleViolations', []))}")
+    except Exception as e:
+        print(f"[ERROR] generate_forensics_report_data failed: {e}")
+        import traceback; traceback.print_exc()
+        report_data = {"riskyStatements": [], "ruleViolations": [], "actionSuggestions": []}
+    
+    # 构建聊天记录摘录（带时间戳），嵌入报告
+    chat_log = []
+    for msg in messages:
+        role_label = "买家" if msg.sender_role == "buyer" else "商家"
+        time_str = msg.created_at.strftime('%H:%M') if msg.created_at else ""
+        content_str = msg.content if msg.content_type == "text" else "[图片]"
+        chat_log.append({
+            "time": time_str,
+            "role": role_label,
+            "side": "我方" if msg.sender_role == "buyer" else "对方",
+            "content": content_str
+        })
+    report_data["chatLog"] = chat_log
+
+    return jsonify({
+        "status": "success",
+        "data": report_data
+    })
+
 
 
 if __name__ == '__main__':
