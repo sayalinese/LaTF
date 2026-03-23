@@ -17,6 +17,9 @@ const renderMd = (text: string): string => {
 const props = defineProps<{
   sessionId: string | null;
   sessionTitle: string;
+  platform?: string;
+  buyerId?: string;
+  sellerId?: string;
 }>();
 
 const isOpen = ref(false);
@@ -208,7 +211,8 @@ const sendMessage = async () => {
       (chunk: string) => {
         chatHistory.value[assistantIdx].content += chunk;
         scrollToBottom();
-      }
+      },
+      props.platform
     );
   } catch (e: any) {
     chatHistory.value[assistantIdx].content += `\n[请求失败: ${e.message}]`;

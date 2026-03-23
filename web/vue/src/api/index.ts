@@ -186,13 +186,18 @@ export const detectMessage = async (messageId: string, useVl = false) => {
   return res.data;
 };
 
-export const createSession = async (topicName: string) => {
-  const res = await apiClient.post('/sessions', { topic_name: topicName });
+export const createSession = async (topicName: string, platform: string = 'taobao') => {
+  const res = await apiClient.post('/sessions', { topic_name: topicName, platform });
   return res.data;
 };
 
 export const updateSession = async (sessionId: string, topicName: string) => {
   const res = await apiClient.put(`/sessions/${sessionId}`, { topic_name: topicName });
+  return res.data;
+};
+
+export const changePlatform = async (sessionId: string, platform: string) => {
+  const res = await apiClient.put(`/sessions/${sessionId}`, { platform });
   return res.data;
 };
 
@@ -210,13 +215,14 @@ export const assistantChatStream = async (
   sessionId: string,
   message: string,
   history: Array<{ role: string; content: string }>,
-  onChunk: (chunk: string) => void
+  onChunk: (chunk: string) => void,
+  platform?: string
 ): Promise<void> => {
   const response = await fetch(`/api/sessions/${sessionId}/assistant_chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ message, history })
+    body: JSON.stringify({ message, history, platform })
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({ message: '请求失败' }));

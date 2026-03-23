@@ -68,6 +68,18 @@ except ImportError as e:
     print("Ensure you are running this from the correct environment and paths are set.")
     sys.exit(1)
 
+# RAG 模块（可选，依赖不存在时不影响启动）
+try:
+    from flask_service.rag.retriever import get_retriever
+    from flask_service.rag.prompts import build_rag_system_prompt
+    _RAG_AVAILABLE = True
+except ImportError:
+    _RAG_AVAILABLE = False
+    def get_retriever():  # type: ignore
+        return None
+    def build_rag_system_prompt(base, docs, platform_hint=None):  # type: ignore
+        return base
+
 # 初始化统一的预测管理器
 LAFT_MANAGER = LaFTManager(project_root=str(PROJECT_ROOT))
 
@@ -399,6 +411,7 @@ def _session_to_dict(s):
         "title": s.topic_name,
         "desc": desc,
         "status": s.status,
+        "platform": s.platform or 'taobao',
         "buyer_id": s.buyer_id or '',
         "seller_id": s.seller_id or '',
         "time": s.created_at.strftime('%H:%M') if s.created_at else ''
@@ -439,7 +452,11 @@ def create_session():
         return jsonify({"success": False, "message": "请先登录"}), 401
     data = request.json or {}
     topic_name = (data.get('topic_name') or '未命名交易纠纷').strip() or '未命名交易纠纷'
-    s = DisputeSession(topic_name=topic_name, buyer_id=current_user_id, status='open')
+    platform = (data.get('platform') or 'taobao').strip()
+    # 验证 platform 值
+    if platform not in ['taobao', 'xianyu', 'jd', 'pdd']:
+        platform = 'taobao'
+    s = DisputeSession(topic_name=topic_name, platform=platform, buyer_id=current_user_id, status='open')
     db.session.add(s)
     db.session.commit()
     return jsonify({"success": True, "session": _session_to_dict(s)})
@@ -453,10 +470,13 @@ def update_session(session_id):
     if err: return err
     data = request.json or {}
     topic_name = (data.get('topic_name') or '').strip()
+    platform = (data.get('platform') or '').strip()
     if topic_name:
         s.topic_name = topic_name
+    if platform and platform in ['taobao', 'xianyu', 'jd', 'pdd']:
+        s.platform = platform
     db.session.commit()
-    return jsonify({"success": True, "title": s.topic_name})
+    return jsonify({"success": True, "title": s.topic_name, "platform": s.platform})
 
 @app.route('/sessions/<session_id>', methods=['DELETE'])
 def delete_session(session_id):
@@ -686,6 +706,8 @@ def assistant_chat(session_id):
 
     # 对话历史（前端传来的助手对话记录，保持上下文连贯）
     history = data.get('history', [])
+    # 使用会话绑定的平台，或前端可选覆盖
+    rag_platform = (data.get('platform') or s.platform or 'taobao').strip()
 
     # 确定当前用户角色
     if s.buyer_id == current_user_id:
@@ -736,6 +758,13 @@ def assistant_chat(session_id):
         f"{chat_context}\n"
         "===== 聊天记录结束 ====="
     )
+
+    # RAG 增强：检索相关平台规则条款
+    _retriever = get_retriever() if _RAG_AVAILABLE else None
+    if _retriever is not None:
+        rag_docs = _retriever.retrieve(user_message, platform=rag_platform, k=3)
+        sys_prompt = build_rag_system_prompt(sys_prompt, rag_docs, platform_hint=rag_platform)
+    
 
     # 构建调用消息: system + history + user
     api_messages = [{"role": "system", "content": sys_prompt}]

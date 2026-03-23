@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { fetchSessions, fetchSessionMessages, sendTextMessage, sendImageMessage, detectMessage, explainLogicStream, createSession, updateSession, deleteSession, joinSession } from '../api';
 import { useUserStore } from '../stores/user';
 import FloatingAssistant from '../components/session/FloatingAssistant.vue';
+import ForensicsReport from '../components/detection/ForensicsReport.vue';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 
@@ -52,6 +53,21 @@ const vlStreaming = ref(false);
 const stepLaft = ref<'waiting' | 'active' | 'done'>('waiting');
 const stepVl = ref<'waiting' | 'active' | 'done' | 'skipped'>('waiting');
 const stepReport = ref<'waiting' | 'active' | 'done'>('waiting');
+
+// 定责报告状态
+const showForensicsReport = ref(false);
+const forensicsReportData = ref<{
+    sessionInfo: {
+        id: string;
+        title: string;
+        buyerId: string;
+        sellerId: string;
+        buyerName?: string;
+        sellerName?: string;
+    };
+    messages: any[];
+    detectedMessages: any[];
+} | null>(null);
 
 const isFake = computed(() => detectResult.value && detectResult.value.class_name !== 'Real');
 
@@ -156,6 +172,39 @@ const handleSessionClick = async (item: any) => {
   stopPolling();
   await loadMessages(item.id);
   startPolling();
+};
+
+// 为指定会话打开报告
+const openReportForSession = async (item: any) => {
+  // 切换到该会话
+  await handleSessionClick(item);
+  // 加载该会话的检测结果
+  await loadSessionDetectionResults(item.id);
+  // 打开报告（不打开AI面板）
+  openForensicsReport();
+};
+
+// 加载会话的检测结果
+const loadSessionDetectionResults = async (sessionId: string) => {
+  try {
+    const res = await fetchSessionMessages(sessionId);
+    if (res.success) {
+      // 查找已鉴定的图片消息
+      const detectedMsgs = res.messages.filter((m: any) => 
+        m.type === 'image' && m.hasBeenDetected
+      );
+      
+      if (detectedMsgs.length > 0) {
+        // 获取第一条已鉴定消息的检测结果
+        const firstDetected = detectedMsgs[0];
+        detectingMsgId.value = firstDetected.id;
+        detectResult.value = firstDetected.detectData || firstDetected.ai_detect_data;
+        vlReport.value = firstDetected.detectData?.vl_report || firstDetected.ai_detect_data?.vl_report || '';
+      }
+    }
+  } catch (error) {
+    console.error("加载检测结果失败:", error);
+  }
 };
 
 // 新建会话
@@ -349,6 +398,66 @@ const startVlStream = async () => {
   }
 };
 
+// 打开定责报告
+const openForensicsReport = () => {
+  if (!activeSession.value) return;
+
+  // 从当前消息中收集已鉴定的图片
+  const detectedMsgs = messages.value
+    .filter((m: any) => m.type === 'image' && m.hasBeenDetected)
+    .map((m: any) => {
+      return {
+        id: m.id,
+        content: m.content,
+        sender: m.name,
+        role: m.role,
+        senderId: m.sender_id,
+        detectData: m.detectData || m.ai_detect_data || (detectingMsgId.value === m.id ? detectResult.value : null),
+        vlReport: detectingMsgId.value === m.id ? vlReport.value : null
+      };
+    });
+
+  // 如果当前有检测结果但消息中没有，确保添加到列表
+  if (detectResult.value && detectingMsgId.value) {
+    const existingMsg = detectedMsgs.find(m => m.id === detectingMsgId.value);
+    if (!existingMsg) {
+      const msg = messages.value.find((m: any) => m.id === detectingMsgId.value);
+      if (msg) {
+        detectedMsgs.push({
+          id: msg.id,
+          content: msg.content,
+          sender: msg.name,
+          role: msg.role,
+          senderId: msg.sender_id,
+          detectData: detectResult.value,
+          vlReport: vlReport.value
+        });
+      }
+    }
+  }
+
+  // 获取买家和卖家信息
+  const session = sessions.value.find((s: any) => s.id === activeSession.value?.id);
+
+  forensicsReportData.value = {
+    sessionInfo: {
+      id: activeSession.value.id,
+      title: activeSession.value.title,
+      buyerId: activeSession.value.buyer_id || session?.buyer_id || '',
+      sellerId: activeSession.value.seller_id || session?.seller_id || '',
+    },
+    messages: messages.value,
+    detectedMessages: detectedMsgs
+  };
+
+  showForensicsReport.value = true;
+};
+
+// 关闭定责报告
+const closeForensicsReport = () => {
+  showForensicsReport.value = false;
+};
+
 const handleSendText = async () => {
   if (!inputText.value.trim() || !activeSession.value) return;
   try {
@@ -441,6 +550,15 @@ const handleImageUpload = async (event: Event) => {
               <span class="session-time">{{ item.time }}</span>
               <span v-if="item.status === 'ai_judging'" class="badge judging"><i class="fa-solid fa-robot"></i> 介入中</span>
               <span v-if="item.status === 'open'" class="badge open"><i class="fa-regular fa-clock"></i> 未解决</span>
+              <!-- 已鉴定标记 -->
+              <button 
+                v-if="item.hasReport" 
+                class="badge report-badge"
+                @click.stop="openReportForSession(item)"
+                title="查看定责报告"
+              >
+                <i class="fa-solid fa-file-invoice"></i> 报告
+              </button>
             </div>
           </li>
         </ul>
@@ -704,6 +822,26 @@ const handleImageUpload = async (event: Event) => {
     :session-id="activeSession ? activeSession.id : null"
     :session-title="activeSession ? activeSession.title : ''"
   />
+
+  <!-- 定责报告模态框 -->
+  <Teleport to="body">
+    <div class="forensics-report-overlay" v-if="showForensicsReport" @click.self="closeForensicsReport">
+      <div class="forensics-report-container">
+        <button class="forensics-report-close" @click="closeForensicsReport">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+        <ForensicsReport
+          v-if="forensicsReportData"
+          :session-info="forensicsReportData.sessionInfo"
+          :detected-messages="forensicsReportData.detectedMessages"
+          :all-messages="forensicsReportData.messages"
+          :current-detect-result="detectResult"
+          :current-vl-report="vlReport"
+          @close="closeForensicsReport"
+        />
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -717,7 +855,7 @@ const handleImageUpload = async (event: Event) => {
 
 .chat-container {
   display: flex;
-  height: calc(100vh - 120px);
+  height: calc(100vh - 80px);
   width: 100vw;
   max-width: 1300px;
   background: var(--panel-bg);
@@ -889,6 +1027,18 @@ const handleImageUpload = async (event: Event) => {
 .badge { font-size: 0.7rem; padding: 3px 8px; border-radius: 6px; font-weight: 500; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);}
 .badge.judging { background: linear-gradient(135deg, rgba(168, 85, 247, 0.2), rgba(139, 92, 246, 0.2)); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
 .badge.open { background: var(--border-color); color: var(--text-muted); border: 1px solid var(--border-color);}
+.badge.report-badge {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: white;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
+  padding: 4px 10px;
+}
+.badge.report-badge:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
 
 /* 未登录提示 */
 .not-logged-in-tip {
@@ -1185,6 +1335,12 @@ const handleImageUpload = async (event: Event) => {
   border: 1px solid rgba(232, 121, 249, 0.3);
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ai-content { padding: 24px; overflow-y: auto; color: var(--text-main); flex: 1;}
 
 /* 扫描分析状态 */
@@ -1440,5 +1596,60 @@ const handleImageUpload = async (event: Event) => {
   font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
 }
 .invite-ok-btn:hover { filter: brightness(1.08); }
+
+/* 定责报告居中弹窗遮罩 */
+.forensics-report-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.forensics-report-container {
+  width: 100%;
+  max-width: 1100px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  animation: centerPop 0.25s ease-out;
+}
+
+@keyframes centerPop {
+  from {
+    opacity: 0;
+    transform: translateY(15px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.forensics-report-close {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: 4px;
+  border: none;
+  background: #f3f4f6;
+  color: #374151;
+  font-size: 1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  z-index: 10000;
+}
+
+.forensics-report-close:hover {
+  background: #e5e7eb;
+}
 </style>
 

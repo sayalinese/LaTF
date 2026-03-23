@@ -59,3 +59,16 @@ safetensors
 # ============================================
 python-dotenv
 
+# ============================================
+# RAG 知识库（电商规则检索增强）
+# ============================================
+langchain
+langchain-community
+langchain-postgres
+langchain-huggingface
+pymupdf
+sentence-transformers
+pgvector
+psycopg[binary]
+
+

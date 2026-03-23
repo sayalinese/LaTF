@@ -20,6 +20,7 @@ class DisputeSession(db.Model):
     buyer_id = db.Column(db.String(50), db.ForeignKey('users.id'))
     seller_id = db.Column(db.String(50), db.ForeignKey('users.id'))
     topic_name = db.Column(db.String(255), nullable=False, default='未命名交易纠纷')
+    platform = db.Column(db.String(50), default='taobao')  # taobao, xianyu, jd, pdd
     status = db.Column(db.String(20), default='open')  # open, ai_judging, closed
     created_at = db.Column(db.DateTime(timezone=True), default=datetime.utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
