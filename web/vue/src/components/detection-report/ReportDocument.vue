@@ -82,7 +82,7 @@ const formatTime = (isoString: string) => {
             <div class="confidence-meter">
               <span>置信度：{{ (aiData.confidence * 100).toFixed(2) }}%</span>
               <div class="bar-bg">
-                <div class="bar-fill" :style="{ width: `${aiData.confidence * 100}%`, backgroundColor: aiData.isFake ? '#ef4444' : '#10b981' }"></div>
+                <div class="bar-fill" :style="{ width: `${aiData.confidence * 100}%`, backgroundColor: aiData.isFake ? '#ef4444' : '#64748b' }"></div>
               </div>
             </div>
           </div>
@@ -252,7 +252,7 @@ const formatTime = (isoString: string) => {
 }
 
 .report-header {
-  border-bottom: 3px solid #1e3a8a;
+  border-bottom: 3px solid #333333;
   padding-bottom: 20px;
   margin-bottom: 30px;
   position: relative;
@@ -269,7 +269,7 @@ const formatTime = (isoString: string) => {
 .logo {
   font-size: 20px;
   font-weight: bold;
-  color: #1e3a8a;
+  color: #333333;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -306,7 +306,7 @@ const formatTime = (isoString: string) => {
 
 .section-title {
   font-size: 20px;
-  color: #1e3a8a;
+  color: #333333;
   border-bottom: 1px solid #cbd5e1;
   padding-bottom: 8px;
   margin-bottom: 20px;
@@ -316,7 +316,7 @@ const formatTime = (isoString: string) => {
 }
 
 .bg-icon {
-  background: #1e3a8a;
+  background: #333333;
   color: white;
   width: 24px;
   height: 24px;
@@ -373,8 +373,8 @@ const formatTime = (isoString: string) => {
   font-size: 13px;
   font-weight: bold;
 }
-.role-badge.buyer { background: #dbeafe; color: #1e40af; }
-.role-badge.seller { background: #fef3c7; color: #b45309; }
+.role-badge.buyer { background: #f1f5f9; color: #475569; }
+.role-badge.seller { background: #e2e8f0; color: #334155; }
 
 .conclusion-box {
   padding: 24px;
@@ -387,8 +387,8 @@ const formatTime = (isoString: string) => {
   background: #fef2f2;
 }
 .conclusion-box.real {
-  border-left-color: #10b981;
-  background: #ecfdf5;
+  border-left-color: #94a3b8;
+  background: #f8fafc;
 }
 
 .verdict {
@@ -399,7 +399,7 @@ const formatTime = (isoString: string) => {
   gap: 10px;
 }
 .conclusion-box.fake .verdict { color: #b91c1c; }
-.conclusion-box.real .verdict { color: #047857; }
+.conclusion-box.real .verdict { color: #334155; }
 
 .confidence-meter {
   font-size: 14px;
@@ -508,8 +508,8 @@ const formatTime = (isoString: string) => {
   border-radius: 4px;
 }
 .risk-badge.high { color: #dc2626; background: #fee2e2; }
-.risk-badge.medium { color: #f59e0b; background: #fef3c7; }
-.risk-badge.low { color: #16a34a; background: #dcfce7; }
+.risk-badge.medium { color: #475569; background: #f1f5f9; }
+.risk-badge.low { color: #64748b; background: #f8fafc; }
 .quote-context {
   font-size: 12px;
   color: #64748b;
@@ -524,13 +524,13 @@ const formatTime = (isoString: string) => {
 }
 .rule-item {
   background: #f1f5f9;
-  border-left: 4px solid #3b82f6;
+  border-left: 4px solid #64748b;
   padding: 12px;
   margin-bottom: 10px;
   border-radius: 0 6px 6px 0;
 }
 .rule-header {
-  color: #1e3a8a;
+  color: #333333;
   margin-bottom: 6px;
   font-size: 15px;
 }
@@ -557,8 +557,8 @@ const formatTime = (isoString: string) => {
   gap: 8px;
   align-items: baseline;
 }
-.chat-line.buyer { background: #eff6ff; }
-.chat-line.seller { background: #fef2f2; }
+.chat-line.buyer { background: #f1f5f9; }
+.chat-line.seller { background: #e2e8f0; }
 .chat-time { color: #94a3b8; font-size: 12px; flex-shrink: 0; min-width: 40px; }
 .chat-role { color: #64748b; font-weight: 600; font-size: 12px; flex-shrink: 0; }
 .chat-content { color: #1e293b; word-break: break-all; }
@@ -573,7 +573,7 @@ const formatTime = (isoString: string) => {
   line-height: 1.6;
 }
 .action-item strong {
-  color: #1e3a8a;
+  color: #333333;
   font-size: 15px;
 }
 .action-item p {

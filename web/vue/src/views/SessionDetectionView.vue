@@ -863,7 +863,7 @@ const handleImageUpload = async (event: Event) => {
                   <p v-else-if="isFake && !detectingMsgIsOpponent">该图片由<strong>「我方 <span v-if="detectingMsgSenderName">({{ detectingMsgSenderName }})</span>」</strong>提供，AI 判定为 <strong>AIGC 生成图像</strong>，请核实该图片来源，如有误判请申诉。</p>
                   <p v-else>该图片由<strong>「{{ detectingMsgIsOpponent ? "对方" : "我方" }} <span v-if="detectingMsgSenderName">({{ detectingMsgSenderName }})</span>」</strong>提供，未检出明显伪造痕迹，被判定为 <strong>真实图像</strong>。</p>
                   
-                  <button class="export-report-btn" :disabled="isGeneratingReport" @click="openForensicsReport" style="margin-top: 15px; width: 100%; border: none; background: #3b82f6; color: white; padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; gap: 8px; transition: background 0.2s;">
+                  <button class="export-report-btn" :disabled="isGeneratingReport" @click="openForensicsReport" style="margin-top: 15px; width: 100%; border: none; background: #333333; color: white; padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; gap: 8px; transition: background 0.2s;">
                       <template v-if="!isGeneratingReport">
                         <i class="fa-solid fa-file-pdf"></i> 生成完整定责报告
                       </template>

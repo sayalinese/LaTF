@@ -123,10 +123,10 @@ button {
 }
 
 .btn-print {
-  background: #3b82f6;
+  background: #333333;
   color: white;
 }
-.btn-print:hover { background: #2563eb; }
+.btn-print:hover { background: #111111; }
 
 .btn-close {
   background: transparent;
