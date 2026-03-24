@@ -224,16 +224,40 @@ const formatTime = (isoString: string) => {
     size: A4;
     margin: 0;
   }
+  
+  /* Force browsers to print background colors and text colors accurately */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
   .report-document {
     width: 100%;
     min-height: auto;
     box-shadow: none;
     padding: 15mm;
   }
+  
   .watermark {
-    /* Sometimes browsers hide bg graphics on print, need color-adjust */
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
+    /* Increase opacity explicitly for printing */
+    color: rgba(226, 232, 240, 0.8) !important;
+  }
+  
+  /* Fix header text colors fading during print */
+  .logo {
+    color: #333333 !important;
+  }
+  .report-title {
+    color: #0f172a !important;
+  }
+  .report-id {
+    color: #64748b !important;
+  }
+  .header-meta {
+    color: #475569 !important;
+  }
+  .report-header {
+    border-bottom: 3px solid #333333 !important;
   }
 }
 
@@ -247,16 +271,23 @@ const formatTime = (isoString: string) => {
   font-weight: 900;
   white-space: nowrap;
   pointer-events: none;
-  z-index: 0;
+  /* CHANGED: Make sure z-index is positive but lower than content to fix html2canvas bug */
+  z-index: 1;
   user-select: none;
 }
 
+.report-content {
+  position: relative;
+  z-index: 2;
+}
+
 .report-header {
-  border-bottom: 3px solid #333333;
+  border-bottom: 2px solid #000000;
   padding-bottom: 20px;
   margin-bottom: 30px;
   position: relative;
-  z-index: 1;
+  z-index: 10;
+  background-color: transparent; 
 }
 
 .header-top {
@@ -269,15 +300,21 @@ const formatTime = (isoString: string) => {
 .logo {
   font-size: 20px;
   font-weight: bold;
-  color: #333333;
+  color: #000000;
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
+.logo i,
+.logo span {
+  color: #000000 !important;
+  opacity: 1 !important;
+}
+
 .report-id {
   font-family: monospace;
-  color: #64748b;
+  color: #000000;
   font-size: 14px;
 }
 
@@ -286,14 +323,15 @@ const formatTime = (isoString: string) => {
   font-size: 32px;
   letter-spacing: 4px;
   margin: 0 0 20px 0;
-  color: #0f172a;
+  color: #000000;
+  font-weight: bold;
 }
 
 .header-meta {
   display: flex;
   justify-content: center;
   gap: 30px;
-  color: #475569;
+  color: #000000;
   font-size: 14px;
 }
 

@@ -11,28 +11,86 @@ const emit = defineEmits<{
   (e: 'close'): void;
 }>();
 
-const isSavingPdf = ref(false);
+const isSavingImage = ref(false);
+const scrollContainerRef = ref<HTMLElement | null>(null);
+const exportVersion = 'IMG_EXPORT_V3';
 
-const handleExportPdf = async () => {
-  const el = document.querySelector('.report-document') as HTMLElement;
+const handleExportImage = async () => {
+  const el = scrollContainerRef.value?.querySelector('.report-document') as HTMLElement | null;
   if (!el) return;
 
-  isSavingPdf.value = true;
+  isSavingImage.value = true;
   try {
-    const html2pdf = (await import('html2pdf.js')).default;
+    const html2canvas = (await import('html2canvas')).default;
+    const canvas = await html2canvas(el, {
+      scale: 2,
+      useCORS: true,
+      logging: false,
+      backgroundColor: '#ffffff',
+      onclone: (doc) => {
+        const report = doc.getElementById('report-document-content');
+        if (!report) return;
+        const wm = report.querySelector('.watermark') as HTMLElement | null;
+        if (wm) wm.remove();
+
+        // 强制移除所有可能影响颜色的 CSS 类和内联样式，并直接赋予最纯粹的样式
+        const logo = report.querySelector('.logo') as HTMLElement | null;
+        const logoIcon = report.querySelector('.logo i') as HTMLElement | null;
+        const logoText = report.querySelector('.logo span') as HTMLElement | null;
+        
+        if (logo) {
+          logo.removeAttribute('style');
+          logo.setAttribute('style', 'color: #000000 !important; background: none !important; opacity: 1 !important; filter: none !important; mix-blend-mode: normal !important;');
+        }
+        if (logoIcon) {
+          logoIcon.removeAttribute('style');
+          logoIcon.setAttribute('style', 'color: #000000 !important; background: none !important; opacity: 1 !important;');
+        }
+        if (logoText) {
+          logoText.removeAttribute('style');
+          logoText.setAttribute('style', 'color: #000000 !important; background: none !important; opacity: 1 !important;');
+        }
+
+        const reportId = report.querySelector('.report-id') as HTMLElement | null;
+        const reportTitle = report.querySelector('.report-title') as HTMLElement | null;
+        const headerMeta = report.querySelector('.header-meta') as HTMLElement | null;
+        const reportHeader = report.querySelector('.report-header') as HTMLElement | null;
+        
+        if (reportId) {
+          reportId.style.setProperty('color', '#000000', 'important');
+          reportId.style.setProperty('opacity', '1', 'important');
+          reportId.style.setProperty('filter', 'none', 'important');
+        }
+        if (reportTitle) {
+          reportTitle.style.setProperty('color', '#000000', 'important');
+          reportTitle.style.setProperty('font-weight', '800', 'important');
+          reportTitle.style.setProperty('opacity', '1', 'important');
+          reportTitle.style.setProperty('filter', 'none', 'important');
+        }
+        if (headerMeta) {
+          headerMeta.style.setProperty('color', '#000000', 'important');
+          headerMeta.style.setProperty('opacity', '1', 'important');
+          headerMeta.style.setProperty('filter', 'none', 'important');
+        }
+        if (reportHeader) {
+          reportHeader.style.setProperty('border-bottom', '2px solid #000000', 'important');
+          reportHeader.style.setProperty('opacity', '1', 'important');
+          reportHeader.style.setProperty('filter', 'none', 'important');
+          reportHeader.style.setProperty('mix-blend-mode', 'normal', 'important');
+          reportHeader.style.setProperty('background', '#ffffff', 'important');
+        }
+      }
+    });
+    
     const timestamp = new Date().toISOString().slice(0, 10);
-    await html2pdf()
-      .set({
-        margin: 0,
-        filename: `潜迹寻真-取证报告-${timestamp}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true, logging: false },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      })
-      .from(el)
-      .save();
+    const link = document.createElement('a');
+    link.download = `潜迹寻真-取证报告-${exportVersion}-${timestamp}.png`;
+    link.href = canvas.toDataURL('image/png', 1.0);
+    link.click();
+  } catch (error) {
+    console.error('Failed to export image:', error);
   } finally {
-    isSavingPdf.value = false;
+    isSavingImage.value = false;
   }
 };
 </script>
@@ -44,12 +102,12 @@ const handleExportPdf = async () => {
       <!-- Toolbar -->
       <div class="toolbar no-print">
         <div class="toolbar-left">
-          <i class="fa-solid fa-file-shield"></i> 取证鉴定报告预览
+          <i class="fa-solid fa-file-shield"></i> 取证鉴定报告预览（{{ exportVersion }}）
         </div>
         <div class="toolbar-right">
-          <button class="btn-print" @click="handleExportPdf" :disabled="isSavingPdf">
-            <i :class="isSavingPdf ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-file-pdf'"></i>
-            {{ isSavingPdf ? '生成中...' : '保存 PDF' }}
+          <button class="btn-print" @click="handleExportImage" :disabled="isSavingImage">
+            <i :class="isSavingImage ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-image'"></i>
+            {{ isSavingImage ? '生成中...' : '保存为长图 V3' }}
           </button>
           <button class="btn-close" @click="emit('close')">
             <i class="fa-solid fa-xmark"></i>
@@ -57,8 +115,7 @@ const handleExportPdf = async () => {
         </div>
       </div>
 
-      <!-- Scrollable Content -->
-      <div class="document-scroll-container">
+      <div class="document-scroll-container" ref="scrollContainerRef">
         <ReportDocument :data="reportData" />
       </div>
 
