@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue';
+import { ref, onMounted, onUnmounted, nextTick, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { fetchSessions, fetchSessionMessages, sendTextMessage, sendImageMessage, detectMessage, explainLogicStream, createSession, updateSession, deleteSession, joinSession } from '../api';
 import { useUserStore } from '../stores/user';
@@ -16,6 +16,9 @@ const renderMd = (text: string): string => {
 
 const { state: userState } = useUserStore();
 const router = useRouter();
+
+const MESSAGE_POLL_INTERVAL_MS = 5000;
+const SESSION_POLL_INTERVAL_MS = 30000;
 
 const sessions = ref<any[]>([]);
 const activeSession = ref<any>(null);
@@ -120,6 +123,8 @@ const lastMsgId = ref<string | null>(null);
 const pollingTimer = ref<any>(null);
 const sessionPollTimer = ref<any>(null);
 
+const isAuthExpiredError = (error: any) => error?.response?.status === 401;
+
 const loadMessages = async (sessionId: string) => {
   try {
     const res = await fetchSessionMessages(sessionId);
@@ -135,7 +140,7 @@ const loadMessages = async (sessionId: string) => {
 };
 
 const pollMessages = async () => {
-  if (!activeSession.value) return;
+  if (!userState.isLoggedIn || !activeSession.value || document.hidden) return;
   try {
     const res = await fetchSessionMessages(activeSession.value.id, lastMsgId.value ?? undefined);
     if (res.success && res.messages.length > 0) {
@@ -148,10 +153,15 @@ const pollMessages = async () => {
         scrollToBottom();
       }
     }
-  } catch { /* 轮询失败静默忽略 */ }
+  } catch (error: any) {
+    if (isAuthExpiredError(error)) {
+      stopPolling();
+    }
+  }
 };
 
 const pollSessions = async () => {
+  if (!userState.isLoggedIn || document.hidden) return;
   try {
     const res = await fetchSessions();
     if (res.success) {
@@ -164,13 +174,18 @@ const pollSessions = async () => {
       });
       if (fresh.length > 0) sessions.value.push(...fresh);
     }
-  } catch { /* 轮询失败静默忽略 */ }
+  } catch (error: any) {
+    if (isAuthExpiredError(error)) {
+      stopPolling();
+    }
+  }
 };
 
 const startPolling = () => {
   stopPolling();
-  pollingTimer.value = setInterval(pollMessages, 1500);
-  sessionPollTimer.value = setInterval(pollSessions, 5000);
+  if (!userState.isLoggedIn || document.hidden) return;
+  pollingTimer.value = setInterval(pollMessages, MESSAGE_POLL_INTERVAL_MS);
+  sessionPollTimer.value = setInterval(pollSessions, SESSION_POLL_INTERVAL_MS);
 };
 
 const stopPolling = () => {
@@ -178,16 +193,48 @@ const stopPolling = () => {
   if (sessionPollTimer.value) { clearInterval(sessionPollTimer.value); sessionPollTimer.value = null; }
 };
 
+const handleDocumentClick = () => {
+  showSessionMenu.value = false;
+};
+
+const handleVisibilityChange = () => {
+  if (document.hidden) {
+    stopPolling();
+    return;
+  }
+  if (userState.isLoggedIn) {
+    pollSessions();
+    pollMessages();
+    startPolling();
+  }
+};
+
+watch(() => userState.isLoggedIn, async (isLoggedIn) => {
+  if (!isLoggedIn) {
+    stopPolling();
+    sessions.value = [];
+    messages.value = [];
+    activeSession.value = null;
+    lastMsgId.value = null;
+    return;
+  }
+
+  await loadSessions();
+  startPolling();
+});
+
 onMounted(() => {
-  loadSessions().then(() => startPolling());
-  document.addEventListener('click', () => { showSessionMenu.value = false; });
-  document.addEventListener('visibilitychange', () => {
-    document.hidden ? stopPolling() : startPolling();
-  });
+  if (userState.isLoggedIn) {
+    loadSessions().then(() => startPolling());
+  }
+  document.addEventListener('click', handleDocumentClick);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 });
 
 onUnmounted(() => {
   stopPolling();
+  document.removeEventListener('click', handleDocumentClick);
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
 });
 
 const handleSessionClick = async (item: any) => {

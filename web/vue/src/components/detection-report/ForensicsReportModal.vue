@@ -79,6 +79,15 @@ const handleExportImage = async () => {
           reportHeader.style.setProperty('mix-blend-mode', 'normal', 'important');
           reportHeader.style.setProperty('background', '#ffffff', 'important');
         }
+
+        // 强制展开聊天记录容器，避免长图被截断
+        const chatLogs = report.querySelectorAll('.chat-log');
+        chatLogs.forEach((chatLog) => {
+          const el = chatLog as HTMLElement;
+          el.style.setProperty('max-height', 'none', 'important');
+          el.style.setProperty('overflow-y', 'visible', 'important');
+          el.style.setProperty('height', 'auto', 'important');
+        });
       }
     });
     

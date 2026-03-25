@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory, session as flask_session
 from flask_cors import CORS
+from datetime import timedelta
 import os
 import sys
 import torch
@@ -29,6 +30,8 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = False   # HTTP 开发环境不需要 HTTPS
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_PATH'] = '/'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+app.config['SESSION_REFRESH_EACH_REQUEST'] = False
 
 # 上传文件配置
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -325,6 +328,7 @@ def login():
 
     user = User.query.filter_by(id=username, password=password).first()
     if user:
+        flask_session.permanent = True
         flask_session['user_id'] = user.id
         disputes_count = DisputeSession.query.filter((DisputeSession.buyer_id == user.id) | (DisputeSession.seller_id == user.id)).count()
         history_count = disputes_count * 3 + 5 
