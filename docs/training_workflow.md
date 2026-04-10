@@ -2,10 +2,10 @@
 
 ## 项目概述
 
-LaTF (LaRE + TruFor Fusion) 是一个融合深度学习和图像法证技术的AI生成图像检测系统。项目采用混合架构，结合CLIP语义理解、LaRE局部重建误差、以及TruFor篡改可靠性图，实现全局和局部协同的精准检测。
+LaTF 是一个融合深度学习和图像法证技术的AI生成图像检测系统。当前主线架构结合 CLIP 语义理解、LaRE 局部重建误差、SSFR 纹理先验，以及亮度/掩码引导的多尺度定位头，实现全局分类与局部定位协同检测。
 
 ### 核心特性
-- **三源证据融合**：CLIP语义 + LaRE重建误差 + TruFor可靠性图
+- **三源证据融合**：CLIP语义 + LaRE重建误差 + 亮度/掩码定位监督
 - **双层检测策略**：全局AI检测 + 局部篡改定位
 - **智能采样**：珍贵数据（doubao）全采样，海量数据（flux/sdxl）比例采样
 - **级联推理**：两阶段推理，自适应阈值，精准检测率提升
@@ -29,10 +29,10 @@ LaTF (LaRE + TruFor Fusion) 是一个融合深度学习和图像法证技术的A
 | 技术 | 所在模块 | 功能 |
 |------|----------|------|
 | **LaRE** (Latent Reconstruction Error) | `service/lare_extractor_module.py` | 从扩散模型特征提取，检测AI生成痕迹 |
-| **TruFor** (Tamper Detection) | `service/trufor_wrapper.py` | 篡改定位和可靠性评分，基于GRIP UNINA |
+| **FLH / 多尺度定位头** | `service/model_v11_fusion.py` | 基于亮度图和掩码监督输出 32/64/128 多尺度定位图 |
 | **SRM滤波器** (Spatial Rich Models) | `service/model_v11_fusion.py` | 高频噪声增强，用于伪造检测 |
 | **级联推理** (Cascade Inference) | `service/cascade_inference.py` | 两阶段检测（全局扫描→局部聚焦） |
-| **多头融合** (Multi-Head Attention) | `service/model_base.py` | 特征融合机制，整合CLIP+LaRE+TruFor |
+| **多头融合** (Multi-Head Attention) | `service/model_base.py` | 特征融合机制，整合CLIP+LaRE+定位证据 |
 
 ### 模型架构详解
 
@@ -53,9 +53,9 @@ LaTF (LaRE + TruFor Fusion) 是一个融合深度学习和图像法证技术的A
 └─────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────┐
-│ 分支3: TruFor可靠性图                │
-│ TruFor → 像素级篡改分数              │
-│ 统计池化 → 全局聚合(2048维)         │
+│ 分支3: 亮度引导 + 多尺度定位头       │
+│ 在线亮度图 → 32/64/128定位概率图     │
+│ 掩码监督 → 局部篡改区域聚合          │
 └─────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────┐
@@ -113,12 +113,12 @@ VAE解码器重建 (记录各步特征)
   - FP16: 混合精度，可能有数值不稳定
   - **BF16**: 推荐用于RTX 30/40系列 (~4GB per batch), 数值稳定性好
 
-#### TruFor篡改检测
+#### 亮度引导与掩码监督
 
-- **输入**: 原始图像 (任意分辨率)
-- **输出**: 篡改概率图 (像素级可靠性分数)
-- **原理**: GRIP UNINA的图法证库，通过频域和空域分析
-- **精度**: ~3s/图 (动态规划优化)
+- **输入**: 原始图像 + 可选局部编辑掩码
+- **输出**: 32×32 / 64×64 / 128×128 多尺度定位概率图
+- **原理**: 训练时在线生成亮度图，仅对有掩码样本计算分割损失
+- **特点**: 无需预生成外部 TruFor 热力图，链路更短且更稳定
 
 #### 级联推理策略
 
@@ -158,7 +158,7 @@ graph TD
 ### 2. 模型训练阶段
 
 ```
-端到端单轮训练：注释生成 → 特征提取 → TruFor生成 → 模型训练 → 模型评估
+端到端单轮训练：注释生成 → 特征提取 → （按需）掩码同步 → 模型训练 → 模型评估
 （已优化为直接训练V11融合模型，无需多阶段微调）
 ```
 
@@ -214,15 +214,17 @@ for img_path, label in train_dataset.train_list:
 - 验证`1_gen_annotations.py`是否正确识别doubao数据为全采样
 - 检查生成的注释文件中doubao数据占比是否符合预期
 
-### 2. TruFor地图缺失
+### 2. 定位监督缺失
 
-**问题**：`trufor_maps/data`目录中缺少`Fake`子目录。
+**问题**：`data/doubao/masks`或`data/change/masks`缺少对应掩码，或新增局部编辑数据后未同步掩码。
 
-**影响**：TruFor集成训练时无法加载fake图像的可靠性图。
+**影响**：分类仍可训练，但定位分支无法获得有效监督，局部热力图会退化。
 
 **解决方案**：
-- 运行`5_gen_trufor_maps.py --strict_alignment`生成缺失地图
-- 或暂时禁用TruFor机制（`use_trufor=False`）
+- 检查`data/doubao/masks`与`data/change/masks`中的文件名能否与局部编辑样本一一对应
+- Doubao 成对数据更新后，可运行`python script\6_gen_masks.py`同步掩码
+- 外部局部篡改数据建议整理为`data/change/images`与`data/change/masks`，无需走自动掩码生成
+- 快速分类冒烟时可降低分割损失影响，例如调低`seg_loss_scale`
 
 ### 3. 模型训练不收敛
 
@@ -266,7 +268,6 @@ for img_path, label in train_dataset.train_list:
 # 第1步：清理旧数据和特征文件
 # ============================================
 Remove-Item -Force -Recurse .\dift.pt
-Remove-Item -Force -Recurse .\trufor_maps\data\*
 
 # ============================================
 # 第2步：生成训练注释（全数据集）
@@ -284,22 +285,22 @@ python script\2_extract_features.py --input_path annotation\test_sdxl.txt --bf16
 # 输出：dift.pt/ 文件夹（包含所有提取的特征）
 
 # ============================================
-# 第4步：生成TruFor篡改可靠性图
+# 第4步（可选）：同步局部编辑掩码
 # ============================================
-python script\5_gen_trufor_maps.py
-# 输出：trufor_maps/data/ 目录（Real/AI生成类别）
+python script\6_gen_masks.py
+# 仅在更新了 doubao 局部编辑样本或标注时执行
 
 # ============================================
 # 第5步：训练V11融合模型（核心环节）
 # ============================================
 # 启用混合精度（AMP）加速训练
 python script\5_train_model_v11.py --use_amp
-# 输出：outputs/v13_doubao_focused/ 目录（best.pth, latest.pth）
+# 输出：outputs/v14_multiscale/ 目录（best.pth, latest.pth）
 
 # ============================================
 # 第6步：模型评估（按分类别统计）
 # ============================================
-python test\evaluate_by_category.py --model outputs/v13_doubao_focused/best.pth
+python test\evaluate_by_category.py --model outputs/v14_multiscale/best.pth
 # 输出：per_category_results.csv
 ```
 
@@ -307,11 +308,11 @@ python test\evaluate_by_category.py --model outputs/v13_doubao_focused/best.pth
 
 | 步骤 | 脚本 | 功能 | 输入 | 输出 | 耗时 |
 |------|------|------|------|------|------|
-| 1 | 清理 | 删除旧特征和TruFor图 | - | 清空缓存 | <1min |
+| 1 | 清理 | 删除旧特征缓存 | - | 清空缓存 | <1min |
 | 2 | gen_annotations | 生成数据划分注释 | data/ | annotation/*.txt | 1-2min |
 | 3 | extract_features | 提取LaRE深度特征 | annotation/*.txt | dift.pt/ | 2-4h |
-| 4 | gen_trufor_maps | 生成TruFor可靠性图 | annotation/*.txt | trufor_maps/data/ | 1-2h |
-| 5 | train_model_v11 | 训练融合模型 | dift.pt/, trufor_maps/ | outputs/v13_* | 4-8h |
+| 4 | gen_masks（可选） | 同步局部编辑掩码 | annotation/*.txt | data/doubao/masks/ | 5-20min |
+| 5 | train_model_v11 | 训练融合模型 | dift.pt/, masks | outputs/v14_* | 4-8h |
 | 6 | evaluate | 评估模型性能 | best.pth | per_category_results.csv | 0.5-1h |
 
 ### 关键参数说明
@@ -362,9 +363,9 @@ cuDNN版本: 8.6+
   - 代码库: ~2GB
   - 数据集: 可变 (根据采样比例)
   - LaRE特征: ~50GB (10万图)
-  - TruFor图: ~30GB (10万图)
+    - 定位监督资源: 通常随数据集提供，无需额外预生成大规模热力图
   - 模型权重: ~3GB (V13)
-  - **总计**: ~100GB+ (完整训练)
+    - **总计**: ~70GB+ (完整训练，取决于特征缓存规模)
 
 ---
 
@@ -409,15 +410,15 @@ USE_AMP=true
    - 在`1_gen_annotations.py`中检查doubao数据识别逻辑
    - 确保LaREDeepFakeV11模型正确使用doubao权重增强
 
-4. **错误：TruFor地图生成失败**
-   - 检查`trufor_maps/data`目录是否存在
-   - 验证`项目参考/TruFor-main/TruFor_train_test/`路径正确
-   - 确认TruFor权重文件存在：`pretrained_models/trufor.pth.tar`
-   - 查看错误日志：`python script\5_gen_trufor_maps.py 2>&1 | Tee-Object error.log`
+4. **错误：定位监督未生效**
+    - 检查`data/doubao/masks`目录是否存在且文件名可与样本对应
+    - 验证训练日志中是否输出了分割损失与多尺度 Dice 指标
+    - 如更新过局部编辑样本，重新运行：`python script\6_gen_masks.py`
+    - 快速分类冒烟时可先降低`seg_loss_scale`，确认主分类链路正常
 
 5. **模型训练不收敛**
    - 检查特征文件是否完整：验证`dift.pt/ann.txt`行数
-   - 确认TruFor图已生成：验证`trufor_maps/data/Real`和`trufor_maps/data/Fake`目录
+    - 确认mask监督样本存在：验证`data/doubao/masks`中目标文件可加载
    - 减少学习率或增加训练轮数
    - 查看训练日志中的损失值变化
 
@@ -434,11 +435,8 @@ USE_AMP=true
 # 清理特征文件
 Remove-Item -Force -Recurse .\dift.pt
 
-# 清理TruFor图
-Remove-Item -Force -Recurse .\trufor_maps\data\*
-
 # 删除旧模型（可选）
-Remove-Item -Force -Recurse .\outputs\v13_doubao_focused
+Remove-Item -Force -Recurse .\outputs\v14_multiscale
 
 # 然后重新执行训练流程
 ```
@@ -448,10 +446,11 @@ Remove-Item -Force -Recurse .\outputs\v13_doubao_focused
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
 | v1.0 | 2024-01 | 初始版本，两阶段微调流程 |
-| v1.1 | 2024-02 | 添加TruFor集成说明 |
+| v1.1 | 2024-02 | 增加局部定位链路说明 |
 | v1.2 | 2024-03 | 完善潜在隐患分析 |
 | v2.0 | 2024-12 | **主要更新**：简化为端到端单轮训练，直接训练V11融合模型 |
 | v2.1 | 2026-03 | 更新为LaTF项目标识，项目名称LaTF生效 |
+| v2.2 | 2026-03 | 移除TruFor预生成阶段，统一为V14多尺度定位流程 |
 
 ## 参考链接
 
@@ -470,7 +469,7 @@ Remove-Item -Force -Recurse .\outputs\v13_doubao_focused
 |------|------|------|------|
 | 单张推理 (全流程) | ~1.0s | 6GB | - |
 | ├─ LaRE特征提取 | 0.3s | 4GB | 256维特征 |
-| ├─ TruFor计算 | 0.5s | 2GB | 像素级图 |
+| ├─ 亮度图/定位头 | 0.5s | 2GB | 多尺度热力图 |
 | └─ 分类推理 | 0.2s | 1GB | logits |
 | 批量推理 (batch=8) | ~0.15s/张 | 10GB | - |
 | 级联推理 (含定位热力) | ~1.5s | 8GB | bbox + prob |
@@ -510,10 +509,10 @@ LaRE特征提取 (SDXL-Lightning, BF16):
 ├─ 精度: 256维浮点向量
 └─ 可靠性: 支持断点续炼
 
-TruFor图生成:
-├─ 吞吐量: ~60张/分钟
-├─ 输出分辨率: 自适应原图尺寸
-└─ 文件大小: ~3-5MB/张 (.npy格式)
+定位监督准备:
+├─ doubao 掩码按需同步，无需全量预生成外部热力图
+├─ 在线亮度图由数据集在训练时生成
+└─ 额外磁盘开销远低于旧热力图流程
 ```
 
 ### 训练性能
@@ -528,8 +527,8 @@ V11模型训练 (RTX 3090, batch_size=8):
 
 数据加载时间:
 ├─ dift.pt特征逐个加载: 10-15秒/batch
-├─ TruFor图加载: 5-10秒/batch
-└─ 优化空间: 预加载或SSD缓存
+├─ mask读取与亮度图生成: 1-3秒/batch
+└─ 优化空间: 预加载特征或SSD缓存
 ```
 
 ---

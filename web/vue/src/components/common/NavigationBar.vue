@@ -62,6 +62,7 @@ watchEffect(() => {
     display: flex;
     align-items: center;
     gap: 16px;
+  justify-self: end;
 }
 .user-indicator {
     text-decoration: none;
@@ -130,8 +131,8 @@ watchEffect(() => {
     width: 100%;
     max-width: 1200px;
     padding: 0 20px;
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
 }
 
@@ -142,6 +143,7 @@ watchEffect(() => {
     display: flex;
     align-items: center;
     gap: 10px;
+    justify-self: start;
 }
 
 .nav-brand i {
@@ -154,6 +156,7 @@ watchEffect(() => {
     gap: 30px;
     margin: 0;
     padding: 0;
+    justify-self: center;
 }
 
 .nav-links li a {

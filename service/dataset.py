@@ -5,12 +5,27 @@ import logging
 import cv2
 import numpy as np
 import torch
+from functools import lru_cache
 from pathlib import Path
 from torch.utils.data import Dataset
 import albumentations as A
 from torchvision import transforms
 
 logger = logging.getLogger(__name__)
+
+MASK_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp')
+
+
+def _dedupe_paths(paths):
+    unique = []
+    seen = set()
+    for path in paths:
+        path_str = str(path)
+        if path_str in seen:
+            continue
+        seen.add(path_str)
+        unique.append(path)
+    return unique
 
 class SDXLCollector:
     def __init__(self, fake_root, real_root):
@@ -47,13 +62,13 @@ class ImageDataset(Dataset):
                  is_train=True,
                  enable_v11=False, # New flag for V11 features
                  highres_size=512, # Resolution for texture branch
-                 enable_trufor=False, # [V13] TruFor Map Support
+                 enable_luma=True, # [V15] Luma map for FLH (replaces TruFor)
                  drop_no_map=True
                  ):
         self.data_root = Path(data_root).resolve()
         self.data_size = data_size
         self.enable_v11 = enable_v11
-        self.enable_trufor = enable_trufor
+        self.enable_luma = enable_luma
         self.highres_size = highres_size
         self.train_list = []
         self.test_list = []  # 初始化 test_list
@@ -64,83 +79,80 @@ class ImageDataset(Dataset):
         self.is_train = is_train  # 保存 is_train 参数
         self.drop_no_map = drop_no_map
         
-        # [V13] TruFor Root
-        # data/ -> trufor_maps/data/
-        self.trufor_root = self.data_root.parent / "trufor_maps" / "data"
+        # [V15] TruFor removed, luma generated on-the-fly
+        # (no pre-computed map directory needed)
 
         # Initialize Transforms
         self.transform_pipeline = transform
         
         # Define synchronized transforms (Geometric) - Apply to both Image and LossMap
-        # Note: Resize is handled separately because LossMap is already small (32x32)
-        # We only flip/rotate the LossMap to match the Image orientation.
-        # [V11] Added 'highres' target
+        # Resize is handled separately per branch. Here we only apply shared geometric ops
+        # so image, highres, mask, luma, and loss_map always use identical spatial params.
+
+        # Heavy transforms (warp-based) — only for image/highres/mask (same resolution)
+        # loss_map (7ch, 32×32) and luma (1ch, 32×32) are excluded because OpenCV
+        # warpAffine/remap cannot handle 7-channel data and resolution mismatch.
+        heavy_targets = {}
+        if self.enable_v11:
+            heavy_targets['highres'] = 'image'
+
+        # [Phase3] Heavy warp transforms DISABLED — loss_map (7ch, 32×32) cannot be
+        # spatially transformed in sync, causing train-time misalignment that degrades
+        # localization. Only lightweight axis transforms (Rotate90/Flip) are safe.
+        self.heavy_geo_transform = None
+
+        # Light transforms (axis-only, safe for any channel count / resolution)
         additional_targets = {'loss_map': 'image'}
         if self.enable_v11:
             additional_targets['highres'] = 'image'
-        if self.enable_trufor:
-            additional_targets['trufor'] = 'image'
-            
+        if self.enable_luma:
+            additional_targets['luma'] = 'mask'
+
         self.geometric_transform = A.Compose([
             A.RandomRotate90(p=0.33),
             A.HorizontalFlip(p=0.33),
         ], additional_targets=additional_targets, is_check_shapes=False, p=1.0) if is_train else None
 
-        # Define Image-only transforms (Resize, Photometric)
+        # Per-branch resize first, then shared geometry, then photometric on image only.
+        self.image_resize_transform = A.Compose([
+            A.Resize(height=self.data_size, width=self.data_size, p=1.0),
+        ], p=1.0)
+
+        self.highres_resize_transform = A.Compose([
+            A.Resize(height=self.highres_size, width=self.highres_size, p=1.0),
+        ], p=1.0) if self.enable_v11 else None
+
         if is_train:
-            self.image_transform = A.Compose([
-                A.Resize(height=self.data_size, width=self.data_size, p=1.0),
+            self.image_photo_transform = A.Compose([
                 A.OneOf([
                     A.GaussianBlur(blur_limit=(3, 7), p=1.0),
                     A.ToGray(p=1.0),
                 ], p=0.5),
                 A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
             ], p=1.0)
-            
-            # [V11] HighRes Transform (Texture Branch) - Less augmentation to preserve noise?
-            # Usually we keep geometric sync, but photometric can be applied
-            self.highres_transform = A.Compose([
-                A.Resize(height=self.highres_size, width=self.highres_size, p=1.0),
-                # texture branch might benefit from less color jitter to preserve pattern?
-                # For now keeping it simple: just Resize.
-            ], p=1.0)
-            
         else:
-            self.image_transform = A.Compose([
-                A.Resize(height=self.data_size, width=self.data_size, p=1.0),
-            ], p=1.0)
+            self.image_photo_transform = None
             
-            self.highres_transform = A.Compose([
-                A.Resize(height=self.highres_size, width=self.highres_size, p=1.0),
-            ], p=1.0)
-            
-        self.clip_norm = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=(0.48145466, 0.4578275, 0.40821073),
-                std=(0.26862954, 0.26130258, 0.27577711),
-            ),
-        ])
+        # [V17 Perf] 直接 numpy→tensor 归一化，跳过 ToPILImage 中间转换
+        _clip_mean = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(3, 1, 1)
+        _clip_std  = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(3, 1, 1)
+        self._clip_mean = _clip_mean
+        self._clip_std  = _clip_std
         
-        # [V11] Normalization for Texture Branch (ImageNet stats usually)
-        # EfficientViT/ConvNeXt expect ImageNet mean/std
-        self.highres_norm = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=(0.485, 0.456, 0.406), 
-                std=(0.229, 0.224, 0.225),
-            ),
-        ])
+        _inet_mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        _inet_std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        self._inet_mean = _inet_mean
+        self._inet_std  = _inet_std
         
-        # [V12] Mask Pre-loading (V12.1 Refined)
-        # Scan for masks directory to enable pixel-level supervision
-        self.mask_root = self.data_root / 'doubao' / 'masks'
-        # V12 assumes manual mask generation, so check existence
-        self.use_masks = self.mask_root.exists() and any(self.mask_root.iterdir())
+        # [V12+] Support multiple localization supervision roots.
+        self.mask_roots = _dedupe_paths([
+            self.data_root / 'doubao' / 'masks',
+            self.data_root / 'change' / 'masks',
+        ])
+        self.use_masks = any(root.exists() and any(root.iterdir()) for root in self.mask_roots)
         if self.use_masks:
-            print(f"[Dataset V12] Mask Supervision ACTIVE. Files found in {self.mask_root}")
+            active_roots = [str(root) for root in self.mask_roots if root.exists() and any(root.iterdir())]
+            print(f"[Dataset V12] Mask Supervision ACTIVE. Files found in {active_roots}")
         else:
             print(f"[Dataset V12] Mask Supervision INACTIVE. (Masks missing)")
 
@@ -219,7 +231,7 @@ class ImageDataset(Dataset):
                 image_path, image_label = line.rsplit(' ', 1)
             
             label = int(image_label)
-            if self.split_anchor and random.random() < 0.1 and label == 0 and len(self.anchor_list) < 100:
+            if self.is_train and self.split_anchor and random.random() < 0.1 and label == 0 and len(self.anchor_list) < 100:
                 self.anchor_list.append((image_path, label))
             else:
                 # 如果是验证模式，将数据添加到 test_list
@@ -286,6 +298,60 @@ class ImageDataset(Dataset):
             
         return filtered_list, map_paths
 
+    def _load_mask(self, image_path, label):
+        mask = np.zeros((self.highres_size, self.highres_size), dtype=np.float32)
+        if not (self.use_masks and label == 1):
+            return mask
+
+        stem = Path(image_path).stem
+        image_path_norm = str(image_path).lower().replace('\\', '/')
+
+        candidate_roots = []
+        if '/change/images/' in image_path_norm or '/change/fack/' in image_path_norm:
+            candidate_roots.append(self.data_root / 'change' / 'masks')
+        if '/doubao/' in image_path_norm:
+            candidate_roots.append(self.data_root / 'doubao' / 'masks')
+
+        candidate_roots.extend(self.mask_roots)
+        candidate_roots = _dedupe_paths(candidate_roots)
+
+        candidate_paths = []
+        for root in candidate_roots:
+            for ext in MASK_EXTENSIONS:
+                candidate_paths.append(root / f"{stem}{ext}")
+        candidate_paths = _dedupe_paths(candidate_paths)
+
+        for mask_path_png in candidate_paths:
+            if not mask_path_png.exists():
+                continue
+            try:
+                mask_data = np.fromfile(str(mask_path_png), dtype=np.uint8)
+                mask_img = cv2.imdecode(mask_data, cv2.IMREAD_GRAYSCALE)
+                if mask_img is not None:
+                    mask_resized = cv2.resize(
+                        mask_img,
+                        (self.highres_size, self.highres_size),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    mask = mask_resized.astype(np.float32) / 255.0
+                    break
+            except Exception:
+                continue
+        return mask
+
+    def _generate_luma(self, image, target_hw):
+        h, w = target_hw
+        luma = np.zeros((h, w), dtype=np.float32)
+        if not self.enable_luma:
+            return luma
+
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if image.ndim == 3 else image
+            luma = cv2.resize(gray, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+        except Exception:
+            pass
+        return luma
+
     def __len__(self):
         if self.isAnchor: return len(self.anchor_list)
         if self.isVal: return len(self.test_list)
@@ -302,15 +368,22 @@ class ImageDataset(Dataset):
         image_path, label = data_list[index]
         map_path = map_list[index]
         
-        # Load Map
-        # loss_map shape is (C, H, W) -> (4, 32, 32)
+        # Load Map  [V17 Perf: weights_only=True 加速 torch.load]
+        # loss_map shape is (C, H, W) -> (7, 32, 32) for SSFR v16, or (6, 32, 32) for legacy
         if map_path and Path(map_path).exists():
             try:
-                loss_map = torch.load(map_path, map_location='cpu') # Load to CPU first
+                loss_map = torch.load(map_path, map_location='cpu', weights_only=True)
             except Exception:
-                loss_map = torch.zeros((4, 32, 32), dtype=torch.float32)
+                loss_map = torch.zeros((7, 32, 32), dtype=torch.float32)
         else:
-            loss_map = torch.zeros((4, 32, 32), dtype=torch.float32)
+            loss_map = torch.zeros((7, 32, 32), dtype=torch.float32)
+
+        # [V16] Backward compat: pad Ch6 with zeros if old 6-channel features
+        if loss_map.dim() == 3 and loss_map.shape[0] == 6:
+            loss_map = torch.cat([loss_map, torch.zeros(1, loss_map.shape[1], loss_map.shape[2])], dim=0)
+        if loss_map.dtype in [torch.bfloat16, torch.float16]:
+            loss_map = loss_map.float()
+        loss_map = loss_map.contiguous()
 
         # Load Image
         full_path = self._normalize_img_path(image_path)
@@ -322,150 +395,79 @@ class ImageDataset(Dataset):
         except Exception:
             image = np.zeros((self.data_size, self.data_size, 3), dtype=np.uint8)
 
-        # [V13] Load TruFor Map (Pre-Transform)
-        # Default: zeros (C=1, H, W) -> will be resized to match image
-        trufor_np = np.zeros((self.data_size, self.data_size), dtype=np.float32)
-        if self.enable_trufor:
-             # [Fixed] Map path mirrors image path
-             rel_path = Path(image_path)
-             if rel_path.is_absolute():
-                 try:
-                    rel_path = rel_path.resolve().relative_to(self.data_root)
-                 except ValueError:
-                    # Fallback: find 'data' in path
-                    parts = rel_path.parts
-                    if 'data' in parts:
-                        idx = max(i for i, p in enumerate(parts) if p == 'data')
-                        rel_path = Path(*parts[idx+1:])
-             tf_path = self.trufor_root / rel_path.with_suffix('.png')
-             
-             # Handle Chinese paths explicitly
-             tf_full_path = str(tf_path.absolute())
-             
-             try:
-                 # Check existence
-                 if tf_path.exists():
-                     # Use numpy fromfile to handle complex Windows paths (including Chinese)
-                     # cv2.imread fails on non-ASCII paths on Windows
-                     tf_data = np.fromfile(tf_full_path, dtype=np.uint8)
-                     tf_img = cv2.imdecode(tf_data, cv2.IMREAD_GRAYSCALE)
-                     
-                     if tf_img is not None:
-                         # Resize to data_size
-                         trufor_np = cv2.resize(tf_img, (self.data_size, self.data_size), interpolation=cv2.INTER_LINEAR)
-                         trufor_np = trufor_np.astype(np.float32) / 255.0
-             except Exception:
-                 pass
+        mask = self._load_mask(image_path, label)
+        raw_image = image
+
+        # Prepare branch-specific resolutions first, then apply one shared geometric transform.
+        if self.transform_pipeline:
+            image = self.transform_pipeline(image=raw_image)['image']
+        else:
+            image = raw_image
+
+        image = self.image_resize_transform(image=image)['image']
+        highres = None
+        if self.enable_v11 and self.highres_resize_transform is not None:
+            highres = self.highres_resize_transform(image=raw_image)['image']
+
+        loss_map_np = np.ascontiguousarray(loss_map.permute(1, 2, 0).cpu().numpy().astype(np.float32))
+        luma_np = self._generate_luma(image, loss_map.shape[-2:]) if self.enable_luma else None
 
         # Apply Transforms
-        if self.transform_pipeline:
-            # Legacy/External transform support
-            image = self.transform_pipeline(image=image)['image']
-        else:
-            # New synchronized pipeline
-            # [V11] Prepare multiple versions if needed
-            highres = None
-            if self.enable_v11:
-                # Create the highres version (Resize only)
-                highres = self.highres_transform(image=image)['image']
-            
-            # 1. Resize Image (LossMap is already small)
-            if self.image_transform:
-                image = self.image_transform(image=image)['image']
-            
-            # 2. Geometric Transforms (Flip/Rotate) - Synced
-            if self.geometric_transform and not self.isVal and not self.isAnchor:
-                # [CRITICAL Fix 1] Convert loss map to float32 if needed
-                if loss_map.dtype == torch.bfloat16:
-                    loss_map = loss_map.float()
-                    
-                # [CRITICAL Fix 2] Resize loss_map to match image size
-                orig_h, orig_w = loss_map.shape[1], loss_map.shape[2]
-                target_h, target_w = image.shape[0], image.shape[1]  # Numpy: (H, W, C)
-                
-                loss_map_resized = torch.nn.functional.interpolate(
-                    loss_map.unsqueeze(0), 
-                    size=(target_h, target_w), 
-                    mode='nearest'
-                ).squeeze(0)
-                
-                # Convert to Numpy (H,W,C)
-                loss_map_np = loss_map_resized.permute(1, 2, 0).numpy()
-                
-                # Prepare args for transform
-                transform_args = {'image': image, 'loss_map': loss_map_np}
-                if self.enable_v11:
+        if not self.isVal and not self.isAnchor:
+            # Step 1: Heavy warp transforms (ShiftScaleRotate, Elastic)
+            # Applied to highres (512) + mask (512) which share the same resolution.
+            # Then image (448) is derived from augmented highres via resize.
+            if self.heavy_geo_transform is not None and self.enable_v11 and highres is not None:
+                heavy_res = self.heavy_geo_transform(image=highres, mask=mask)
+                highres = heavy_res['image']
+                mask = heavy_res['mask']
+                # Regenerate image from augmented highres
+                image = self.image_resize_transform(image=highres)['image']
+
+            # Step 2: Light axis transforms (Rotate90, Flip) — all targets including loss_map/luma
+            if self.geometric_transform is not None:
+                transform_args = {
+                    'image': image,
+                    'mask': mask,
+                    'loss_map': loss_map_np,
+                }
+                if self.enable_v11 and highres is not None:
                     transform_args['highres'] = highres
-                if self.enable_trufor:
-                    transform_args['trufor'] = trufor_np
-                
-                # Apply transform with fallback for size mismatch
-                try:
-                    res = self.geometric_transform(**transform_args)
-                    image = res['image']
-                    loss_map_np = res['loss_map']
-                    if self.enable_v11: highres = res['highres']
-                    if self.enable_trufor: trufor_np = res['trufor']
-                except ValueError:
-                    # Fallback: Transform main items only
-                    res = self.geometric_transform(image=image, loss_map=loss_map_np)
-                    image = res['image']
-                    loss_map_np = res['loss_map']
-                    # highres/trufor get NO geometric augs in fallback
-                
-                # Convert back to Tensor and resize back to 32x32
-                loss_map_resized = torch.from_numpy(loss_map_np).permute(2, 0, 1)
-                loss_map = torch.nn.functional.interpolate(
-                    loss_map_resized.unsqueeze(0),
-                    size=(orig_h, orig_w),
-                    mode='nearest'
-                ).squeeze(0)
-            
-            elif self.enable_v11 and highres is None:
-                 # If not training (val/anchor), we still need highres
-                 highres = self.highres_transform(image=image)['image']
-                
-        # [V12] Mask Loading Strategy
-        mask = np.zeros((self.highres_size, self.highres_size), dtype=np.float32)
-        if self.use_masks and label == 1:
-            stem = Path(image_path).stem
-            # Supports both .png (generated) and .jpg (original name style)
-            mask_path_png = self.mask_root / f"{stem}.png"
-            if mask_path_png.exists():
-                try:
-                    # Read as grayscale
-                    # Use np.fromfile for Windows Chinese path support
-                    mask_data = np.fromfile(str(mask_path_png), dtype=np.uint8)
-                    mask_img = cv2.imdecode(mask_data, cv2.IMREAD_GRAYSCALE)
-                    
-                    if mask_img is not None:
-                        # Resize to match training resolution (nearest neighbor to keep sharp edges)
-                        mask_resized = cv2.resize(mask_img, (self.highres_size, self.highres_size), interpolation=cv2.INTER_NEAREST)
-                        # Normalize to 0.0-1.0
-                        mask = mask_resized.astype(np.float32) / 255.0
-                except Exception:
-                    pass 
+                if self.enable_luma and luma_np is not None:
+                    transform_args['luma'] = luma_np
 
-        # Final safety check: ensure loss_map is float32 and contiguous
-        if loss_map.dtype in [torch.bfloat16, torch.float16]:
-            loss_map = loss_map.float()
-        loss_map = loss_map.contiguous()
+                res = self.geometric_transform(**transform_args)
+                image = res['image']
+                mask = res['mask']
+                loss_map_np = res['loss_map']
+                if self.enable_v11 and highres is not None:
+                    highres = res['highres']
+                if self.enable_luma and luma_np is not None:
+                    luma_np = res['luma']
 
-        # Final Normalization for CLIP
-        image = self.clip_norm(image)
+        # Photometric transforms are image-only; keep them after shared geometry.
+        if self.image_photo_transform is not None and not self.isVal and not self.isAnchor:
+            image = self.image_photo_transform(image=image)['image']
+
+        loss_map = torch.from_numpy(np.ascontiguousarray(loss_map_np)).permute(2, 0, 1).float().contiguous()
+
+        # Final Normalization for CLIP  [V17 Perf: 直接 numpy→tensor, 无 PIL 中间层]
+        image = torch.from_numpy(image.transpose(2, 0, 1).copy()).float().div_(255.0)
+        image = (image - self._clip_mean) / self._clip_std
         
         # [V11/V12/V13] Returns
         returns = [image, label, loss_map]
         
         if self.enable_v11:
-            highres = self.highres_norm(highres)
+            highres = torch.from_numpy(highres.transpose(2, 0, 1).copy()).float().div_(255.0)
+            highres = (highres - self._inet_mean) / self._inet_std
             mask_tensor = torch.from_numpy(mask).unsqueeze(0).float()
             returns.extend([highres, mask_tensor])
             
-        if self.enable_trufor:
-            # TruFor: (H, W) -> (1, H, W)
-            trufor_tensor = torch.from_numpy(trufor_np).unsqueeze(0).float()
-            returns.append(trufor_tensor)
+        if self.enable_luma:
+            # Luma: (H, W) -> (1, H, W)
+            luma_tensor = torch.from_numpy(luma_np).unsqueeze(0).float()
+            returns.append(luma_tensor)
 
         # [Debug/Vis] Append Path
         returns.append(str(full_path))

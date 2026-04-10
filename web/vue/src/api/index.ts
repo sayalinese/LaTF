@@ -2,7 +2,7 @@ import axios from 'axios';
 import type { PredictResponse, ConfigResponse, ExplainLogicResponse } from '../types/api';
 
 const apiClient = axios.create({
-  baseURL: '/api', // Vite 代理指向 /api -> http://127.0.0.1:5000
+  baseURL: '/api', // Vite 代理指向 /api -> http://127.0.0.1:5555
   timeout: 60000,
   withCredentials: true,
 });

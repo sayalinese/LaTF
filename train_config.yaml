@@ -21,8 +21,7 @@ model:
   clip_type: "RN50x64"
   texture_model: "convnext_tiny"
   num_classes: 2
-  enable_trufor: true           # 启用 TruFor 特征
-  trufor_loss_weight: 10.0     # TruFor 损失权重
+  enable_luma: true             # 启用亮度图与定位分支
 
 # 训练参数
 training:
@@ -34,6 +33,7 @@ training:
   clip_learning_rate: 0.000002 # CLIP backbone 学习率
   epochs: 25
   freeze_clip_epochs: 6         # 冻结 CLIP 的轮数
+  freeze_loc_epochs: 6          # 前期冻结定位分支，先稳定分类训练
   early_stop_patience: 5        # 早停耐心值
   workers: 8                     # 数据加载工作线程数
   val_freq: 1                    # 验证频率（每轮验证）
@@ -54,8 +54,11 @@ scheduler:
 # 损失函数配置
 loss:
   classification_weight: 1.0    # 分类损失权重
-  segmentation_weight: 50.0      # 分割损失权重（mask学习）
-  trufor_weight: 10.0           # TruFor 损失权重
+  segmentation_weight: 50.0     # 分割损失权重（仅对有mask样本生效）
+  seg_loss_scale: 0.1           # 分割损失整体缩放
+  seg_weight_32: 0.15           # 32x32 定位监督权重
+  seg_weight_64: 0.25           # 64x64 定位监督权重
+  seg_weight_128: 0.50          # 128x128 定位监督权重
 
 # 特征提取配置
 feature_extraction:
@@ -68,25 +71,19 @@ feature_extraction:
   extract_batch_size: 8         # 特征提取批次大小
   extract_workers: 8             # 特征提取工作线程数
 
-# TruFor 配置
-trufor:
-  model_path: "项目参考/TruFor-main/TruFor_train_test/pretrained_models/trufor.pth.tar"
-  map_dir: "trufor_maps/data"
-  input_resize: [1024, 1024]    # TruFor 输入尺寸
-
 # 输出配置
 output:
-  dir: "outputs/v13_doubao_focused"
-  exp_name: "v13_doubao_focused"
-  model_version: "V11Fusion"
+  dir: "outputs/v14_multiscale"
+  exp_name: "v14_multiscale"
+  model_version: "V14"
   save_freq: 1                   # 保存频率（每轮保存）
   save_best_only: true          # 只保存最佳模型
 
 # 日志配置
 logging:
   tensorboard: true             # 启用 TensorBoard
-  log_dir: "outputs/v13_doubao_focused/logs"
-  checkpoint_dir: "outputs/v13_doubao_focused/checkpoints"
+  log_dir: "outputs/v14_multiscale/logs"
+  checkpoint_dir: "outputs/v14_multiscale/checkpoints"
 
 # 硬件配置
 hardware:

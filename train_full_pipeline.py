@@ -1,111 +1,204 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-LaTF (LaRE + TruFor Fusion) 训练全流程脚本
-包含：数据准备 → 特征提取 → TruFor特征生成 → 模型训练 → 模型评估
-"""
+LaRE 全流程训练脚本 (分类 + 定位 双管道, 解耦架构)
 
+阶段:
+  0 - 环境检查
+  1 - 生成标注 (分类 train/val/test_v2 + 定位 train/val_seg)
+  2 - 构建提取列表 + SSFR 特征提取
+  3 - 训练分类模型 (LaREDeepFakeV11)
+  4 - 训练定位模型 (SegFormer-B2)
+  5 - 模型评估
+
+用法:
+    python train_full_pipeline.py                  # 全部阶段
+    python train_full_pipeline.py --phase 3        # 从 Phase 3 开始
+    python train_full_pipeline.py --skip_extract   # 跳过特征提取
+    python train_full_pipeline.py --phase 4        # 只跑定位训练+评估
+"""
 import os
 import sys
 import subprocess
 import argparse
 from pathlib import Path
-import time
+from datetime import datetime
 
-def run_command(cmd, description):
-    """运行命令并打印输出"""
-    print(f"\n{'='*60}")
-    print(f"执行: {description}")
-    print(f"命令: {cmd}")
-    print('='*60)
-    
-    start_time = time.time()
-    try:
-        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
-        print(f"✓ {description} 完成 ({time.time()-start_time:.1f}秒)")
-        print(f"输出: {result.stdout[:500]}...")  # 只显示前500字符
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"✗ {description} 失败")
-        print(f"错误: {e.stderr}")
-        return False
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+os.chdir(PROJECT_ROOT)
+
+
+def run(cmd, desc, fatal=True):
+    """执行子进程，实时输出。"""
+    print(f"\n  >>> {desc}")
+    print(f"      {cmd}")
+    result = subprocess.run(cmd, shell=True)
+    if result.returncode != 0:
+        msg = f"失败: {desc} (exit code {result.returncode})"
+        if fatal:
+            print(f"  [ERROR] {msg}")
+            sys.exit(1)
+        else:
+            print(f"  [WARN] {msg} — 跳过继续")
+    return result.returncode
+
+
+def phase0():
+    """环境检查"""
+    print("\n" + "=" * 60)
+    print("[Phase 0] 环境检查")
+    print("=" * 60)
+    run('python -c "'
+        "import torch; "
+        "print(f'PyTorch {torch.__version__}, "
+        "CUDA: {torch.cuda.is_available()}, "
+        "GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else chr(78)+chr(47)+chr(65)}')"
+        '"',
+        "检查 PyTorch + CUDA")
+
+
+def phase1():
+    """生成标注文件"""
+    print("\n" + "=" * 60)
+    print("[Phase 1] 生成标注文件")
+    print("=" * 60)
+    run("python script/gen_annotations_v2.py",
+        "分类标注 → train_v2 / val_v2 / test_v2")
+    run("python script/gen_mask_annotations.py",
+        "定位标注 → train_seg / val_seg")
+
+
+def phase2(skip_extract=False):
+    """构建特征提取列表 + 提取 SSFR 特征"""
+    print("\n" + "=" * 60)
+    print("[Phase 2] 特征提取")
+    print("=" * 60)
+
+    # 合并所有标注文件到一个去重提取列表
+    ann_files = [
+        ("annotation/train_v2.txt", "annotation/val_v2.txt",   "annotation/extract_v2.txt"),
+        ("annotation/extract_v2.txt", "annotation/test_v2.txt",  "annotation/extract_v2.txt"),
+        ("annotation/extract_v2.txt", "annotation/train_seg.txt", "annotation/extract_v2.txt"),
+        ("annotation/extract_v2.txt", "annotation/val_seg.txt",  "annotation/extract_v2.txt"),
+    ]
+    for train_f, val_f, out_f in ann_files:
+        run(f"python script/3_build_extract_list.py"
+            f" --train {train_f} --val {val_f} --out {out_f}",
+            f"合并 {val_f} → extract_v2")
+
+    if skip_extract:
+        print("  [跳过] 特征提取 (--skip_extract)")
+        return
+
+    run("python script/2_extract_features.py"
+        " --input_path  annotation/extract_v2.txt"
+        " --output_path dift.pt"
+        " --extractor_type ssfr"
+        " --bf16",
+        "提取 SSFR 特征 (7ch, 32x32)")
+
+
+def phase3():
+    """训练分类模型"""
+    print("\n" + "=" * 60)
+    print("[Phase 3] 训练分类模型 (LaREDeepFakeV11)")
+    print("=" * 60)
+    run("python script/5_train_model_v11.py",
+        "分类训练 (参数读自 .env)")
+
+
+def phase4():
+    """训练定位模型"""
+    print("\n" + "=" * 60)
+    print("[Phase 4] 训练定位模型 (SegFormer-B2)")
+    print("=" * 60)
+    run("python script/train_segformer.py"
+        " --train_file annotation/train_seg.txt"
+        " --val_file   annotation/val_seg.txt"
+        " --out_dir    outputs/segformer_rgb"
+        " --batch_size 12"
+        " --epochs     40"
+        " --patience   10",
+        "SegFormer RGB 3ch 训练")
+
+
+def phase5():
+    """模型评估"""
+    print("\n" + "=" * 60)
+    print("[Phase 5] 模型评估")
+    print("=" * 60)
+
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / '.env')
+    cls_dir = os.getenv('OUT_DIR', 'outputs/v14_multiscale')
+    cls_model = PROJECT_ROOT / cls_dir / 'best.pth'
+    seg_model = PROJECT_ROOT / 'outputs' / 'segformer_rgb' / 'best.pth'
+
+    if cls_model.exists():
+        run(f"python script/4_test_model.py --dir data --model {cls_model}",
+            "分类测试", fatal=False)
+    else:
+        print(f"  [跳过] 分类模型不存在: {cls_model}")
+
+    if seg_model.exists():
+        run(f"python test/evaluate_segformer.py"
+            f" --model {seg_model}"
+            f" --ann_file annotation/val_seg.txt"
+            f" --batch_size 12",
+            "定位验证集评估", fatal=False)
+
+        eval_change = PROJECT_ROOT / 'annotation' / 'eval_change.txt'
+        if eval_change.exists():
+            run(f"python test/evaluate_segformer.py"
+                f" --model {seg_model}"
+                f" --ann_file annotation/eval_change.txt"
+                f" --batch_size 12",
+                "定位独立评估集 (eval_change)", fatal=False)
+    else:
+        print(f"  [跳过] 定位模型不存在: {seg_model}")
+
 
 def main():
-    parser = argparse.ArgumentParser(description='LaRE 训练全流程')
-    parser.add_argument('--skip_data_prep', action='store_true', help='跳过数据准备步骤')
-    parser.add_argument('--skip_feature_extract', action='store_true', help='跳过特征提取步骤')
-    parser.add_argument('--skip_trufor', action='store_true', help='跳过 TruFor 特征生成')
-    parser.add_argument('--skip_training', action='store_true', help='跳过模型训练')
-    parser.add_argument('--skip_evaluation', action='store_true', help='跳过模型评估')
-    parser.add_argument('--data_root', type=str, default='data', help='数据根目录')
-    parser.add_argument('--out_dir', type=str, default='outputs/v13_doubao_focused', help='输出目录')
-    parser.add_argument('--batch_size', type=int, default=16, help='训练批次大小')
-    parser.add_argument('--epochs', type=int, default=25, help='训练轮数')
-    parser.add_argument('--lr', type=float, default=0.0001, help='学习率')
-    parser.add_argument('--texture_model', type=str, default='convnext_tiny', help='纹理分支模型')
-    parser.add_argument('--clip_type', type=str, default='RN50x64', help='CLIP 视觉骨干')
-    parser.add_argument('--highres_size', type=int, default=512, help='高分辨率输入尺寸')
-    
+    parser = argparse.ArgumentParser(description="LaRE 全流程训练 (分类 + 定位)")
+    parser.add_argument("--phase", type=int, default=0,
+                        help="从哪个阶段开始 (0=全部, 1=标注, 2=特征, 3=分类, 4=定位, 5=评估)")
+    parser.add_argument("--skip_extract", action="store_true",
+                        help="跳过特征提取 (已有 dift.pt 时使用)")
     args = parser.parse_args()
-    
-    # 设置工作目录
-    project_root = Path(__file__).resolve().parent
-    os.chdir(project_root)
-    
-    print("="*80)
-    print("LaRE 训练全流程开始")
-    print("="*80)
-    
-    # 1. 数据准备
-    if not args.skip_data_prep:
-        success = run_command(
-            "python script\\1_gen_annotations.py",
-            "生成标注文件（使用 Doubao 权重增强）"
-        )
-        if not success:
-            print("数据准备失败，退出流程")
-            return
-    
-    # 2. 特征提取
-    if not args.skip_feature_extract:
-        success = run_command(
-            "python script\\2_extract_features.py",
-            "提取 LaRE 特征"
-        )
-        if not success:
-            print("特征提取失败，退出流程")
-            return
-    
-    # 3. TruFor 特征生成
-    if not args.skip_trufor:
-        success = run_command(
-            "python script\\5_gen_trufor_maps.py",
-            "生成 TruFor 特征图"
-        )
-        if not success:
-            print("TruFor 特征生成失败，退出流程")
-            return
-    
-    # 4. 模型训练
-    if not args.skip_training:
-        train_cmd = "python script\\5_train_model_v11.py --use_amp"
-        
-        success = run_command(train_cmd, "训练 V11 Fusion + TruFor 模型")
-        if not success:
-            print("模型训练失败，退出流程")
-            return
-    
-    # 5. 模型评估
-    if not args.skip_evaluation:
-        eval_cmd = f"python test\\evaluate_by_category.py --model {args.out_dir}/best.pth"
-        
-        success = run_command(eval_cmd, "评估模型性能")
-        if not success:
-            print("模型评估失败")
-    
-    print("\n" + "="*80)
-    print("训练全流程完成！")
-    print(f"模型保存在: {args.out_dir}/best.pth")
-    print("="*80)
+
+    start = args.phase
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    print("=" * 60)
+    print("  LaRE 全流程训练 (分类 + 定位 解耦架构)")
+    print(f"  起始阶段: Phase {start}")
+    print(f"  时间: {ts}")
+    print("=" * 60)
+
+    phases = [
+        (0, phase0),
+        (1, phase1),
+        (2, lambda: phase2(args.skip_extract)),
+        (3, phase3),
+        (4, phase4),
+        (5, phase5),
+    ]
+
+    for phase_id, func in phases:
+        if phase_id >= start:
+            func()
+
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print("\n" + "=" * 60)
+    print("  全流程完成!")
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / '.env')
+    print(f"  分类模型: {os.getenv('OUT_DIR', 'outputs/v14_multiscale')}/best.pth")
+    print(f"  定位模型: outputs/segformer_rgb/best.pth")
+    print(f"  时间: {ts}")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()

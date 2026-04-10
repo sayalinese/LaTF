@@ -1,5 +1,5 @@
 document.addEventListener("DOMContentLoaded", () => {
-    const API_BASE = (window.__API_BASE__ || "http://127.0.0.1:5000").replace(/\/$/, "");
+    const API_BASE = (window.__API_BASE__ || "http://127.0.0.1:5555").replace(/\/$/, "");
     const uploadArea = document.getElementById("upload-area");
     const fileInput = document.getElementById("file-input");
     const previewContainer = document.getElementById("preview-container");
@@ -332,7 +332,7 @@ document.addEventListener("DOMContentLoaded", () => {
             displayResult(data);
 
         } catch (error) {
-            alert("分析失败。请检查服务器是否运行在 http://127.0.0.1:5000");
+            alert("分析失败。请检查服务器是否运行在 http://127.0.0.1:5555");
             resultContainer.classList.add("hidden");
             console.error(error);
         } finally {

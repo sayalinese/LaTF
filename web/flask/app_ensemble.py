@@ -196,4 +196,4 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=False)
+    app.run(host='0.0.0.0', port=int(os.getenv('FLASK_PORT', '5555')), debug=False, threaded=False)

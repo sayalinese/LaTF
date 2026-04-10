@@ -202,7 +202,7 @@ def run_inference(model, ann_file: Path, device) -> tuple[list, list, list[str]]
         data_size=448,
         highres_size=HIGHRES_SIZE,
         enable_v11=True,
-        enable_trufor=True,
+        enable_luma=True,
         is_train=False,
         drop_no_map=False,
     )
@@ -224,16 +224,16 @@ def run_inference(model, ann_file: Path, device) -> tuple[list, list, list[str]]
             labels    = batch[1].to(device).view(-1)
             loss_maps = batch[2].to(device)
             img_highres = batch[3].to(device) if batch_len >= 4 else None
-            trufor      = batch[5].to(device) if batch_len >= 6 else None
+            luma        = batch[5].to(device) if batch_len >= 6 else None
 
             try:
                 from torch.amp import autocast as amp_autocast
                 amp_t = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
                 with amp_autocast("cuda" if device.type == "cuda" else "cpu",
                                   dtype=amp_t, enabled=device.type == "cuda"):
-                    logits = model(img_clip, img_highres, loss_maps, trufor_map=trufor)
+                    logits = model(img_clip, img_highres, loss_maps, luma_map=luma)
             except Exception:
-                logits = model(img_clip, img_highres, loss_maps, trufor_map=trufor)
+                logits = model(img_clip, img_highres, loss_maps, luma_map=luma)
 
             probs = torch.softmax(logits, dim=1)[:, 1].cpu().tolist()
             lbs   = labels.cpu().tolist()

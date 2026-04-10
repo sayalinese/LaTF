@@ -11,14 +11,14 @@ from pathlib import Path
 from service.model import CLipClassifierWMapV9Lite, CLipClassifierWMapV7, CLipClassifierV10Fusion
 from service.model_v11_fusion import LaREDeepFakeV11
 from service.lare_extractor_module import LareExtractor
-from service.trufor_wrapper import TruForExtractor
+from service.ssfr_extractor_module import SsfrExtractor
 from service.cascade_inference import CascadeInference
 from service.statistical_detector import StatisticalLocalDetector, DualModelDetector
 from service.heatmap_utils import refine_map_for_visibility
 
 class LaFTManager:
     """
-    统一管理 LaRE + TruFor 以及统计检测和融合分类器的加载和预测逻辑。
+    统一管理 LaRE + FLH 以及统计检测和融合分类器的加载和预测逻辑。
     将核心逻辑从 Flask app.py 中解耦。
     """
     def __init__(self, project_root):
@@ -28,7 +28,6 @@ class LaFTManager:
         
         self.model = None
         self.lare_extractor = None
-        self.trufor_extractor = None
         self.cascade_inference = None
         self.dual_detector = None
         self.stat_detector = None
@@ -47,23 +46,27 @@ class LaFTManager:
 
         # 1. Initialize LaRE Extractor
         model_type = os.getenv("LARE_MODEL_TYPE", "sdxl")  
-        print(f"[Config] Using LaRE backbone: {model_type.upper()}")
+        print(f"[Config] Using LaRE backbone: {model_type.upper()}, Model Version: {self.model_version}")
         
         if self.lare_extractor is None:
             try:
-                self.lare_extractor = LareExtractor(device=self.device, model_type=model_type, dtype=torch.float16)
+                if self.model_version in ("V14", "V17", "V13"):
+                    # V14/V17/V13: 使用 SSFR 7ch 特征提取器 (无需 SDXL UNet)
+                    unet_path = os.getenv('SSFR_UNET_PATH', 'outputs/ssfr_unet.pth')
+                    vae_model_id = os.getenv('VAE_MODEL_ID', '')
+                    self.lare_extractor = SsfrExtractor(
+                        device=self.device,
+                        unet_path=unet_path,
+                        vae_model_id=vae_model_id or None
+                    )
+                    print(f"[SSFR] Loaded SsfrExtractor (7ch, UNet={unet_path}, VAE={vae_model_id or 'None'})")
+                else:
+                    self.lare_extractor = LareExtractor(device=self.device, model_type=model_type, dtype=torch.float16)
             except Exception as ex:
-                print(f"[LaRE] Failed to load: {ex}")
+                print(f"[LaRE/SSFR] Failed to load: {ex}")
                 self.lare_extractor = None
 
-        # 2. Initialize TruFor Extractor
-        if self.trufor_extractor is None and self.model_version in ["V13", "V11"]:
-            try:
-                print("[Config] Initializing TruFor Extractor...")
-                self.trufor_extractor = TruForExtractor(device=self.device)
-            except Exception as ex:
-                print(f"[TruFor] Failed to load: {ex}")
-                self.trufor_extractor = None
+        # 2. (TruFor 已移除，改用 FLH + luma，无需外部模型初始化)
 
         # 3. Initialize Classifier
         clip_type = "RN50x64"
@@ -71,11 +74,17 @@ class LaFTManager:
         
         ckpt_path = None
         
-        if self.model_version == "V13" or self.model_version == "V11Fusion":
+        if self.model_version in ("V14", "V17"):
+            texture_model = os.getenv("TEXTURE_MODEL", "convnext_tiny")
+            model = LaREDeepFakeV11(clip_type=clip_type, num_classes=2, texture_model=texture_model)
+            default_out_dir = 'outputs/v14_multiscale' if self.model_version == 'V14' else 'outputs/v17_joint'
+            out_dir = os.getenv('OUT_DIR', default_out_dir)
+            print(f"[Config] Initializing {self.model_version} Joint (Integrated FLH) with Texture Branch: {texture_model}")
+        elif self.model_version == "V13" or self.model_version == "V11Fusion":
             texture_model = os.getenv("TEXTURE_MODEL", "convnext_tiny")
             model = LaREDeepFakeV11(clip_type=clip_type, num_classes=2, texture_model=texture_model)
             out_dir = os.getenv('OUT_DIR', 'outputs/v13_doubao_focused')
-            print(f"[Config] Initializing V13 Fusion (TruFor Enhanced) with Texture Branch: {texture_model}")
+            print(f"[Config] Initializing V13 Fusion (FLH Enhanced) with Texture Branch: {texture_model}")
         elif self.model_version == "V11":
             texture_model = os.getenv("TEXTURE_MODEL", "convnext_tiny")
             model = LaREDeepFakeV11(clip_type=clip_type, num_classes=2, texture_model=texture_model)
@@ -133,11 +142,10 @@ class LaFTManager:
         self.model = model
         
         # 4. Cascade Inference
-        if self.use_cascade and self.model_version in ("V9Lite", "V10Fusion", "V11", "V13"):
+        if self.use_cascade and self.model_version in ("V9Lite", "V10Fusion", "V11", "V13", "V14", "V17"):
             self.cascade_inference = CascadeInference(
                 model=self.model,
                 lare_extractor=self.lare_extractor,
-                trufor_extractor=self.trufor_extractor,
                 device=self.device,
                 threshold=self.cascade_threshold,
                 high_threshold=self.cascade_high_threshold
@@ -225,32 +233,12 @@ class LaFTManager:
                 torch.cuda.empty_cache()
 
     def _predict_cascade(self, img: Image.Image):
-        trufor_vis_map = None
-        trufor_heatmap_b64 = None
-        if self.trufor_extractor is not None:
-            try:
-                # TruFor 需要尺寸是 32 的整倍数，否则输出 map 会被截断只覆盖部分区域
-                TRUFOR_VIS_SIZE = 1024
-                img_resized = img.resize((TRUFOR_VIS_SIZE, TRUFOR_VIS_SIZE), Image.BILINEAR)
-                img_np = np.asarray(img_resized, dtype=np.float32) / 255.0
-                tf_input = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(self.device)
-                tf_np_vis = self.trufor_extractor.extract_batch(tf_input)
-                if tf_np_vis is not None and len(tf_np_vis) > 0:
-                    trufor_vis_map = tf_np_vis[0]
-                    # 热力图叠加到原始尺寸图片上
-                    trufor_heatmap_b64 = self._generate_heatmap_base64(trufor_vis_map, img)
-            except Exception:
-                trufor_vis_map = None
-
         result = self.cascade_inference.inference(img, return_details=True)
         heatmap_base64 = None
         
         map_source = None
         map_source_type = None
-        if trufor_vis_map is not None:
-            map_source = trufor_vis_map
-            map_source_type = "trufor_map"
-        elif result['loc_map'] is not None:
+        if result['loc_map'] is not None:
             map_source = result['loc_map']
             map_source_type = "loc_map"
         elif 'raw_lare_map' in result and result['raw_lare_map'] is not None:
@@ -275,16 +263,12 @@ class LaFTManager:
                 "resolved_out_dir": self.resolved_out_dir,
                 "ckpt_path": self.loaded_ckpt_path,
                 "cascade_enabled": True,
-                "heatmap_source": map_source_type,
-                "trufor_heatmap": trufor_heatmap_b64
+                "heatmap_source": map_source_type
             }
         }
 
     def _predict_standard(self, img: Image.Image):
         from torchvision import transforms
-        # 推理性能配置
-        use_trufor_inference = os.getenv("USE_TRUFOR_INFERENCE", "true").lower() == "true"
-        trufor_infer_size = int(os.getenv("TRUFOR_INFERENCE_SIZE", "512"))  # 训练用1024，推理用512节省显存
 
         preprocess_clip = transforms.Compose([
             transforms.Resize((448, 448)), transforms.ToTensor(),
@@ -294,11 +278,10 @@ class LaFTManager:
             transforms.Resize((512, 512)), transforms.ToTensor(),
             transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
         ])
-        preprocess_trufor = transforms.Compose([transforms.Resize((trufor_infer_size, trufor_infer_size)), transforms.ToTensor()])
         
         with torch.no_grad():
             loss_map = self.lare_extractor.extract_single(img).to(self.device)
-            if torch.cuda.is_available(): torch.cuda.empty_cache()  # SDXL推理后立即清缓存
+            if torch.cuda.is_available(): torch.cuda.empty_cache()
             clip_input = preprocess_clip(img).unsqueeze(0).to(self.device)
             amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
             
@@ -306,19 +289,27 @@ class LaFTManager:
             except ImportError: from torch.cuda.amp import autocast
 
             with autocast('cuda', dtype=amp_dtype):
-                if self.model_version in ["V11", "V13"]:
+                if self.model_version in ("V14", "V17"):
+                    # [V14] 三流融合 + coarse-to-fine 高分辨率定位头
                     highres_input = preprocess_highres(img).unsqueeze(0).to(self.device)
-                    trufor_map = None
-                    if self.trufor_extractor is not None and use_trufor_inference:
-                         tf_in = preprocess_trufor(img).unsqueeze(0).to(self.device)
-                         tf_np = self.trufor_extractor.extract_batch(tf_in)
-                         del tf_in  # 释放输入张量
-                         if tf_np is not None:
-                             tf_tensor = torch.from_numpy(tf_np).unsqueeze(1).float()
-                             tf_tensor = F.interpolate(tf_tensor, size=(448, 448), mode='bilinear', align_corners=False)
-                             trufor_map = tf_tensor.to(self.device)
-                             
-                    try: logits = self.model(clip_input, highres_input, loss_map, trufor_map=trufor_map)
+                    gray = np.array(img.convert('L'), dtype=np.float32) / 255.0
+                    luma_small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_LINEAR)
+                    luma_map = torch.from_numpy(luma_small).unsqueeze(0).unsqueeze(0).float().to(self.device)
+                    
+                    logits, seg_logits = self.model(
+                        clip_input, highres_input, loss_map,
+                        luma_map=luma_map, return_seg=True
+                    )
+                    # V14 fine head 输出: sigmoid → 更高分辨率篡改概率热图
+                    loc_map = torch.sigmoid(seg_logits.float())
+                elif self.model_version in ["V11", "V13"]:
+                    highres_input = preprocess_highres(img).unsqueeze(0).to(self.device)
+                    # Generate luma map on-the-fly (replaces TruFor)
+                    gray = np.array(img.convert('L'), dtype=np.float32) / 255.0
+                    luma_small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_LINEAR)
+                    luma_map = torch.from_numpy(luma_small).unsqueeze(0).unsqueeze(0).float().to(self.device)
+                    
+                    try: logits = self.model(clip_input, highres_input, loss_map, luma_map=luma_map)
                     except TypeError: logits = self.model(clip_input, highres_input, loss_map)
                     loc_map = loss_map
                     if loc_map.shape[1] == 4: loc_map = loc_map.mean(dim=1, keepdim=True)
@@ -328,7 +319,7 @@ class LaFTManager:
                     logits = self.model(clip_input, loss_map)
                     loc_map = None
                 
-        probs = F.softmax(logits, dim=1)[0]
+        probs = F.softmax(logits.float(), dim=1)[0]
         confidence, pred_idx = torch.max(probs, 0)
         
         if probs[1].item() < self.ai_confidence_threshold:
@@ -337,37 +328,11 @@ class LaFTManager:
             
         idx = int(pred_idx.item())
         heatmap_base64 = None
-        use_heatmap = True if (self.model_version in ["V11", "V13"]) else False
+        use_heatmap = self.model_version in ("V14", "V17", "V13", "V11")
 
-        if use_heatmap and (idx == 1 or self.model_version in ["V11", "V13"]) and loc_map is not None:
+        if use_heatmap and loc_map is not None:
             loc_np = loc_map.squeeze().cpu().float().numpy()
-            # Basic Cleanup
-            h, w = loc_np.shape
-            if h > 8 and w > 8:
-                loc_np = loc_np[1:-1, 1:-1]
-                loc_np = np.pad(loc_np, ((1, 1), (1, 1)), mode='edge')
-            p05, p95 = np.percentile(loc_np, [5, 95])
-            loc_clipped = np.clip(loc_np, p05, p95)
-            loc_norm_float = (loc_clipped - p05) / (p95 - p05) if (p95 - p05) > 1e-6 else np.zeros_like(loc_clipped)
-            
-            loc_byte = (loc_norm_float * 255).astype(np.uint8)
-            loc_byte = cv2.morphologyEx(loc_byte, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-            
-            guide_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-            loc_upscaled = cv2.resize(loc_byte, img.size, interpolation=cv2.INTER_LINEAR)
-            
-            try:
-                from cv2.ximgproc import guidedFilter
-                refined_map = guidedFilter(guide=guide_img, src=loc_upscaled, radius=16, eps=500, dDepth=-1)
-                loc_final = cv2.normalize(refined_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            except ImportError:
-                loc_final = cv2.bilateralFilter(loc_upscaled, d=9, sigmaColor=75, sigmaSpace=75)
-
-            heatmap_color = cv2.cvtColor(cv2.applyColorMap(loc_final, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
-            heatmap_pil = Image.fromarray(heatmap_color)
-            buffered = BytesIO()
-            heatmap_pil.save(buffered, format="JPEG", quality=90)
-            heatmap_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            heatmap_base64 = self._generate_heatmap_base64(loc_np, img)
             
         return {
             "class_name": self.class_names[idx], "confidence": float(confidence.item()), "class_idx": idx,

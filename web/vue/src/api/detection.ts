@@ -40,7 +40,7 @@ export const predictImage = async (file: File): Promise<PredictResponse> => {
 };
 
 /**
- * 双检测器检测（基础 + TruFor 热力图）
+ * 双检测器检测（基础结果 + 定位热力图兼容输出）
  * @param file 图片文件
  */
 export const predictDual = async (file: File): Promise<DualPredictResponse> => {

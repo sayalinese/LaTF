@@ -23,7 +23,6 @@ const logicErrorMsg = ref<string | null>(null);
 // Full Report State
 const showFullReport = ref(false);
 const activeReportData = ref<ForensicsReportData | null>(null);
-const truforHeatmapData = ref<string | null>(null);
 
 // Config Status
 const sdkConfig = ref<ConfigResponse | null>(null);
@@ -75,14 +74,9 @@ const handlePredict = async () => {
     logicErrorMsg.value = null;
     showVlmPanel.value = false;
     showFullReport.value = false;
-    truforHeatmapData.value = null;
     
     try {
         result.value = await predictImage(currentFile.value);
-        // 从debug信息中提取TruFor热力图（如果有的话）
-        if (result.value.debug?.trufor_heatmap) {
-            truforHeatmapData.value = result.value.debug.trufor_heatmap;
-        }
     } catch(e: any) {
         errorMsg.value = e.response?.data?.error || e.message || '检测异常';
     } finally {

@@ -27,7 +27,6 @@ class CascadeInference:
         self,
         model,
         lare_extractor,
-        trufor_extractor=None,
         device: str = "cuda",
         input_size: int = 448,
         threshold: float = 0.25,
@@ -38,9 +37,8 @@ class CascadeInference:
     ):
         """
         Args:
-            model: V9-Lite model instance
-            lare_extractor: LaRE feature extractor instance
-            trufor_extractor: TruFor feature extractor instance (Optional)
+            model: V11/V15 model instance
+            lare_extractor: SSFR feature extractor instance
             device: Device to run inference on
             input_size: Model input size (448 for CLIP RN50x64)
             threshold: 下界 - global_prob 超过此才触发 Stage 2
@@ -51,7 +49,6 @@ class CascadeInference:
         """
         self.model = model
         self.lare_extractor = lare_extractor
-        self.trufor_extractor = trufor_extractor
         self.device = device
         self.input_size = input_size
         self.threshold = threshold
@@ -80,12 +77,8 @@ class CascadeInference:
             ),
         ])
 
-        # [V13] TruFor Preprocessing — 使用较低分辨率减少推理显存（可通过环境变量调节）
-        _trufor_size = int(os.getenv("TRUFOR_INFERENCE_SIZE", "512"))
-        self.trufor_transform = transforms.Compose([
-            transforms.Resize((_trufor_size, _trufor_size)),
-            transforms.ToTensor(),
-        ])
+        # [V15] Luma transform (32x32 grayscale for FLH)
+        self.luma_size = 32
     
     def _get_bbox_from_locmap(
         self, 
@@ -203,7 +196,7 @@ class CascadeInference:
         loss_map: torch.Tensor,
         return_loc: bool = False,
         highres_tensor: Optional[torch.Tensor] = None,
-        trufor_map: Optional[torch.Tensor] = None
+        luma_map: Optional[torch.Tensor] = None
     ) -> Tuple[float, int, Optional[torch.Tensor]]:
         """
         Run single prediction.
@@ -225,21 +218,18 @@ class CascadeInference:
         with torch.no_grad():
             with autocast('cuda', dtype=amp_dtype):
                 if highres_tensor is not None:
-                    # [V11] Inference with Texture Branch
+                    # [V15] Inference with Texture Branch + luma_map
                     if return_loc:
-                        # V11 returns (logits, seg_logits)
-                        # Check if model supports trufor_map
                         try:
-                            outputs = self.model(img_tensor, highres_tensor, loss_map, trufor_map=trufor_map, return_seg=True)
+                            outputs = self.model(img_tensor, highres_tensor, loss_map, luma_map=luma_map, return_seg=True)
                         except TypeError:
-                             # Fallback for models without trufor_map
                             outputs = self.model(img_tensor, highres_tensor, loss_map, return_seg=True)
                             
                         logits, seg_logits = outputs
-                        loc_map = torch.sigmoid(seg_logits) # Convert logits to 0-1 prob
+                        loc_map = torch.sigmoid(seg_logits)
                     else:
                         try:
-                            logits = self.model(img_tensor, highres_tensor, loss_map, trufor_map=trufor_map)
+                            logits = self.model(img_tensor, highres_tensor, loss_map, luma_map=luma_map)
                         except TypeError:
                             logits = self.model(img_tensor, highres_tensor, loss_map)
                         loc_map = None
@@ -298,22 +288,15 @@ class CascadeInference:
         if hasattr(self, 'highres_transform'):
              highres_tensor = self.highres_transform(image).unsqueeze(0).to(self.device)
         
-        # [V13] Extract TruFor Map (if available)
-        _use_trufor_infer = os.getenv("USE_TRUFOR_INFERENCE", "true").lower() == "true"
-        trufor_map = None
-        if self.trufor_extractor is not None and _use_trufor_infer:
-             tf_input = self.trufor_transform(image).unsqueeze(0).to(self.device)
-             tf_np = self.trufor_extractor.extract_batch(tf_input)
-             del tf_input  # 释放输入张量
-             if torch.cuda.is_available(): torch.cuda.empty_cache()
-             if tf_np is not None:
-                 tf_tensor = torch.from_numpy(tf_np).unsqueeze(1).float()
-                 tf_tensor = F.interpolate(tf_tensor, size=(448, 448), mode='bilinear', align_corners=False)
-                 trufor_map = tf_tensor.to(self.device)
+        # [V15] Generate luma map (no external model needed)
+        luma_map = None
+        gray_img = image.convert('L').resize((self.luma_size, self.luma_size), Image.LANCZOS)
+        luma_np = np.array(gray_img, dtype=np.float32) / 255.0
+        luma_map = torch.from_numpy(luma_np).unsqueeze(0).unsqueeze(0).float().to(self.device)
 
-        # Extract LaRE features
-        loss_map = self.lare_extractor.extract_single(image)  # [1, 4, 32, 32]
-        if torch.cuda.is_available(): torch.cuda.empty_cache()  # SDXL大模型推理后清内存
+        # Extract SSFR features
+        loss_map = self.lare_extractor.extract_single(image)  # [1, 7, 32, 32]
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
         # Debug Print
         lm_mean = loss_map.float().mean().item()
@@ -327,7 +310,7 @@ class CascadeInference:
         loss_map = loss_map.to(self.device)
         
         global_prob, global_pred, loc_map = self._predict_single(
-            img_tensor, loss_map, return_loc=True, highres_tensor=highres_tensor, trufor_map=trufor_map
+            img_tensor, loss_map, return_loc=True, highres_tensor=highres_tensor, luma_map=luma_map
         )
         
         result = {
@@ -361,24 +344,18 @@ class CascadeInference:
                 if hasattr(self, 'highres_transform'):
                     crop_highres = self.highres_transform(cropped_img).unsqueeze(0).to(self.device)
 
-                # [V13] Extract TruFor for crop
-                crop_trufor = None
-                if self.trufor_extractor is not None and _use_trufor_infer:
-                     tf_input_crop = self.trufor_transform(cropped_img).unsqueeze(0).to(self.device)
-                     tf_np_crop = self.trufor_extractor.extract_batch(tf_input_crop)
-                     del tf_input_crop
-                     if tf_np_crop is not None:
-                         tf_tensor_crop = torch.from_numpy(tf_np_crop).unsqueeze(1).float()
-                         tf_tensor_crop = F.interpolate(tf_tensor_crop, size=(448, 448), mode='bilinear', align_corners=False)
-                         crop_trufor = tf_tensor_crop.to(self.device)
+                # [V15] Generate luma for crop
+                crop_gray = cropped_img.convert('L').resize((self.luma_size, self.luma_size), Image.LANCZOS)
+                crop_luma_np = np.array(crop_gray, dtype=np.float32) / 255.0
+                crop_luma = torch.from_numpy(crop_luma_np).unsqueeze(0).unsqueeze(0).float().to(self.device)
 
-                # Extract LaRE for cropped region
+                # Extract SSFR for cropped region
                 crop_loss_map = self.lare_extractor.extract_single(cropped_img)
                 crop_loss_map = crop_loss_map.to(self.device)
                 
                 # Predict on cropped region
                 local_prob, local_pred, _ = self._predict_single(
-                    crop_tensor, crop_loss_map, return_loc=False, highres_tensor=crop_highres, trufor_map=crop_trufor
+                    crop_tensor, crop_loss_map, return_loc=False, highres_tensor=crop_highres, luma_map=crop_luma
                 )
                 
                 result['local_prob'] = local_prob
@@ -439,7 +416,6 @@ def inference_cascade(
     model, 
     lare_extractor,
     image_path: str,
-    trufor_extractor=None,
     device: str = "cuda",
     threshold: float = 0.5
 ) -> Dict:
@@ -447,10 +423,9 @@ def inference_cascade(
     Convenience function for cascade inference on a single image file.
     
     Args:
-        model: V9-Lite model
-        lare_extractor: LaRE extractor
+        model: V15 model
+        lare_extractor: SSFR extractor
         image_path: Path to image file
-        trufor_extractor: Optional TruFor extractor
         device: Device to use
         threshold: Threshold for local zoom
     
@@ -462,7 +437,6 @@ def inference_cascade(
     cascade = CascadeInference(
         model=model,
         lare_extractor=lare_extractor,
-        trufor_extractor=trufor_extractor,
         device=device,
         threshold=threshold
     )

@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 load_dotenv(PROJECT_ROOT / '.env')
 
 from service.lare_extractor_module import LareExtractor
+from service.ssfr_extractor_module import SsfrExtractor
 from service.processors import SDXLProcessor, GenImageProcessor
 from service.feature_extractors import MultiFeatureExtractor
 
@@ -20,7 +21,7 @@ def main():
     parser.add_argument('--input_path', type=str, required=True, help='Path to annotation file')
     parser.add_argument('--output_path', type=str, default='dift.pt', help='Output directory')
     parser.add_argument('--dataset_type', type=str, default='auto', choices=['auto', 'genimage', 'sdxl'])
-    parser.add_argument('--batch_size', type=int, default=int(os.getenv('EXTRACT_BATCH_SIZE', '8')))
+    parser.add_argument('--batch_size', type=int, default=int(os.getenv('EXTRACT_BATCH_SIZE', '32')))
     parser.add_argument('--model_type', type=str, default='sdxl', choices=['sdxl', 'sd21', 'sd15'])
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--timestep', type=int, default=280)
@@ -28,6 +29,15 @@ def main():
     parser.add_argument('--bf16', action='store_true', help='Use BF16 for extraction (Recommended for RTX 30/40 series)')
     parser.add_argument('--save_aux_features', action='store_true', help='Also extract handcrafted aux features (freq/noise/edge)')
     parser.add_argument('--aux_size', type=int, default=28, help='Spatial size for aux features')
+    parser.add_argument('--extractor_type', type=str, default='ssfr', choices=['ssfr', 'lare'],
+                        help='Feature extractor: ssfr (MicroUNet+信号处理, 6ch) or lare (SDXL UNet, 4ch)')
+    parser.add_argument('--unet_path', type=str, default='outputs/ssfr_unet.pth',
+                        help='Path to trained SSFR UNet model (only for --extractor_type ssfr)')
+    parser.add_argument('--num_workers', type=int, default=int(os.getenv('EXTRACT_WORKERS', '8')),
+                        help='CPU 并行线程数 (SSFR Ch1-Ch5 并行计算，建议设为 CPU 核心数)')
+    parser.add_argument('--vae_model_id', type=str,
+                        default=os.getenv('VAE_MODEL_ID', ''),
+                        help='Flux VAE model ID for Ch6 reconstruction error (e.g. black-forest-labs/FLUX.1-schnell)')
     args = parser.parse_args()
 
     # Setup
@@ -78,7 +88,15 @@ def main():
         dtype = torch.float32
 
     print(f"Using dtype: {dtype}")
-    extractor = LareExtractor(device=args.device, model_type=args.model_type, dtype=dtype)
+    use_ssfr = (args.extractor_type == 'ssfr')
+    n_channels = 7 if use_ssfr else 4
+    if use_ssfr:
+        vae_id = args.vae_model_id if args.vae_model_id else None
+        print(f"[SSFR] 使用 SSFR 提取器 (7 通道, UNet: {args.unet_path}, VAE: {vae_id or 'None'})")
+        extractor = SsfrExtractor(device=args.device, unet_path=args.unet_path, vae_model_id=vae_id)
+    else:
+        print(f"[LaRE] 使用 LaRE 提取器 (4 通道, SDXL UNet)")
+        extractor = LareExtractor(device=args.device, model_type=args.model_type, dtype=dtype)
     aux_extractor = None
     if args.save_aux_features:
         aux_extractor = MultiFeatureExtractor(target_size=args.aux_size).to(args.device)
@@ -112,19 +130,26 @@ def main():
                     aux_path = save_path.with_name(save_path.stem + '_aux.pt') if args.save_aux_features else None
 
                     if save_path.exists() and (not aux_path or aux_path.exists()):
-                        # Skip if exists
-                        info_line = f"{str(img_path).replace('\\', '/')}\t{str(save_path).replace('\\', '/')}\t{label}"
-                        if aux_path:
-                            info_line += f"\t{str(aux_path).replace('\\', '/')}"
-                        info_line += "\n"
-                        valid_batch_infos.append({
-                            'save_path': save_path,
-                            'aux_path': aux_path,
-                            'label': label,
-                            'info_line': info_line,
-                            'exists': True
-                        })
-                        continue
+                        # 检查通道数: 如果已有特征通道数与期望不符则重新提取
+                        try:
+                            existing = torch.load(save_path, map_location='cpu', weights_only=True)
+                            if existing.shape[0] == n_channels:
+                                # Skip if correct channel count
+                                info_line = f"{str(img_path).replace('\\', '/')}\t{str(save_path).replace('\\', '/')}\t{label}"
+                                if aux_path:
+                                    info_line += f"\t{str(aux_path).replace('\\', '/')}"
+                                info_line += "\n"
+                                valid_batch_infos.append({
+                                    'save_path': save_path,
+                                    'aux_path': aux_path,
+                                    'label': label,
+                                    'info_line': info_line,
+                                    'exists': True
+                                })
+                                continue
+                            # else: channel mismatch, fall through to re-extract
+                        except Exception:
+                            pass  # 加载失败也重新提取
 
                     # Load Image
                     img = Image.open(img_path).convert('RGB')
@@ -146,14 +171,15 @@ def main():
             # Process valid new images
             if images:
                 try:
-                    # Preprocess batch
-                    img_tensors = torch.stack([extractor.img_transform(img) for img in images]).to(extractor.device).to(extractor.dtype)
-
-                    # Run Model
-                    features = extractor.extract_batch(img_tensors, timestep=args.timestep) # [B, 4, 32, 32]
+                    if use_ssfr:
+                        # SSFR: GPU 批量推理 UNet (Ch0) + CPU 并行 Ch1-Ch5
+                        features = extractor.extract_from_pil_list(images, n_workers=args.num_workers)  # [B, 7, 32, 32]
+                    else:
+                        # LaRE: GPU batch 提取
+                        img_tensors = torch.stack([extractor.img_transform(img) for img in images]).to(extractor.device).to(extractor.dtype)
+                        features = extractor.extract_batch(img_tensors, timestep=args.timestep)  # [B, 4, 32, 32]
                     aux_features = None
-                    if aux_extractor is not None:
-                        # Force FP32 for fft stability regardless of LaRE dtype
+                    if aux_extractor is not None and not use_ssfr:
                         with torch.no_grad():
                             aux_features = aux_extractor(img_tensors.float())
                     
@@ -171,7 +197,7 @@ def main():
                     # Fallback: Save zeros for failed items
                     for meta in valid_batch_infos:
                         if not meta['exists']:
-                            torch.save(torch.zeros(4, 32, 32), meta['save_path'])
+                            torch.save(torch.zeros(n_channels, 32, 32), meta['save_path'])
                             if meta.get('aux_path'):
                                 torch.save(torch.zeros(3, args.aux_size, args.aux_size), meta['aux_path'])
 

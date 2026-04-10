@@ -15,7 +15,7 @@ export default defineConfig({
     allowedHosts: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:5000', // Flask 后端（本地）
+        target: 'http://localhost:5555', // Flask 后端（本地）
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
         cookieDomainRewrite: { '127.0.0.1': 'localhost', '*': '' }

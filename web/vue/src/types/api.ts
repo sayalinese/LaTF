@@ -17,7 +17,7 @@ export interface PredictResponse {
     ckpt_path?: string | null;
     cascade_enabled: boolean;
     heatmap_source?: string;
-    trufor_heatmap?: string | null;
+    localization_heatmap?: string | null;
   };
 }
 

@@ -17,7 +17,6 @@ sys.path.append(str(PROJECT_ROOT))
 
 from service.model_v11_fusion import LaREDeepFakeV11
 from service.lare_extractor_module import LareExtractor
-from service.trufor_wrapper import TruForExtractor
 from service.cascade_inference import CascadeInference
 
 def load_map_dict(map_file):
@@ -42,7 +41,7 @@ def load_map_dict(map_file):
     return map_dict
 
 def test_consistency():
-    print("=== Running Consistency Test V2 (With TruFor Stats) ===")
+    print("=== Running Consistency Test V2 ===\n")
     only_web = os.getenv("ONLY_WEB", "0") == "1"
     only_local = os.getenv("ONLY_LOCAL", "0") == "1"
     cache_path = PROJECT_ROOT / "web_probs_cache.json"
@@ -61,7 +60,6 @@ def test_consistency():
 
     model = None
     lare_extractor = None
-    trufor_extractor = None
     if not only_web:
         print("Loading models locally...")
         model = LaREDeepFakeV11(
@@ -70,9 +68,9 @@ def test_consistency():
             texture_model="convnext_tiny"
         ).to(device)
         
-        checkpoint_path = PROJECT_ROOT / "outputs" / "v13_trufor_retrain" / "best.pth"
+        checkpoint_path = PROJECT_ROOT / "outputs" / "v13_doubao_focused" / "best.pth"
         if not checkpoint_path.exists():
-             checkpoint_path = PROJECT_ROOT / "outputs" / "v13_trufor_fusion" / "best.pth"
+             checkpoint_path = PROJECT_ROOT / "outputs" / "v13_doubao_focused" / "Val_best.pth"
 
         if checkpoint_path.exists():
             print(f"Loading checkpoint: {checkpoint_path}")
@@ -93,13 +91,11 @@ def test_consistency():
 
         try:
             lare_extractor = LareExtractor(device=device, dtype=torch.float32)
-            trufor_extractor = TruForExtractor(device=device)
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 device = "cpu"
                 model.to(device)
                 lare_extractor = LareExtractor(device=device, dtype=torch.float32)
-                trufor_extractor = TruForExtractor(device=device)
                 print("Switched to CPU due to CUDA OOM.")
             else:
                 raise
@@ -175,15 +171,14 @@ def test_consistency():
         precomputed_maps = load_map_dict(map_file)
 
     # Results table
-    print(f"\n{'Image':<30} | {'Label':<5} | {'Web Prob':<10} | {'Local Prob':<10} | {'L-Map Diff':<10} | {'TF-Mean':<10} | {'TF-Max':<10} | {'Status'}")
-    print("-" * 120)
+    print(f"\n{'Image':<30} | {'Label':<5} | {'Web Prob':<10} | {'Local Prob':<10} | {'L-Map Diff':<10} | {'Status'}")
+    print("-" * 100)
 
     cascade = None
     if not only_web:
         cascade = CascadeInference(
             model=model,
             lare_extractor=lare_extractor,
-            trufor_extractor=trufor_extractor,
             device=device
         )
 
@@ -239,18 +234,6 @@ def test_consistency():
                 
                 res = cascade.inference(raw_pil)
                 local_prob = f"{res['prob']:.4f}"
-                
-                if trufor_extractor:
-                    tf_transform = transforms.Compose([
-                        transforms.Resize((1024, 1024)),
-                        transforms.ToTensor(),
-                    ])
-                    print(f"Image Size: {raw_pil.size}")
-                    tf_input = tf_transform(raw_pil).unsqueeze(0).to(device)
-                    tf_np = trufor_extractor.extract_batch(tf_input)
-                    if tf_np is not None:
-                        tf_mean = f"{tf_np.mean():.4f}"
-                        tf_max = f"{tf_np.max():.4f}"
 
                 local_map = lare_extractor.extract_single(raw_pil, ensemble_size=4).to(device)
                 

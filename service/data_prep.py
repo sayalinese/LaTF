@@ -14,6 +14,7 @@ class SDXLDataCollector:
         self.real_root = Path(real_root)
         # Special directories that bypass sampling (e.g., precious inpaint data)
         self.no_sample_dirs = {'inpaint'}
+        self.mask_dir_names = {'mask', 'masks', 'mask_vis', 'masks_vis'}
         
         # Doubao weight configuration from .env
         self.doubao_weight = float(os.getenv('DOUBAO_WEIGHT', '5.0'))
@@ -46,7 +47,7 @@ class SDXLDataCollector:
                 if subdirs:
                     for sub in subdirs:
                         # FIX: Explicitly ignore 'masks' and 'masks_vis' directories to prevent ground truth leakage
-                        if sub.name.lower() in ['masks', 'masks_vis']:
+                        if sub.name.lower() in self.mask_dir_names:
                             continue
                         
                         # Key: sdxl/animals or inpaint/doubao
@@ -104,8 +105,13 @@ class SDXLDataCollector:
                 inpaint_real.extend(imgs)
                 print(f"[Data] Found {len(imgs)} precious real images from {cat}")
                 continue
-            # Doubao Fake or Inpaint -> Precious Fake
-            if 'doubao' in cat_lower or cat_lower.startswith('inpaint'):
+            # Doubao / change local-edit fake sets bypass heavy downsampling.
+            if (
+                'doubao' in cat_lower
+                or cat_lower.startswith('inpaint')
+                or cat_lower.startswith('change/')
+                or cat_lower == 'change'
+            ):
                 inpaint_fake.extend(imgs)
             else:
                 regular_fake.extend(imgs)
@@ -130,7 +136,7 @@ class SDXLDataCollector:
             print(f"Balanced Real: {len(all_real)}")
         else:
             print(f"Regular Fake Pool (flux/sdxl): {len(regular_fake)}")
-            print(f"Inpaint Fake Pool (doubao etc): {len(inpaint_fake)} [NO SAMPLING - ALL USED]")
+            print(f"Inpaint Fake Pool (doubao/change etc): {len(inpaint_fake)} [NO SAMPLING - ALL USED]")
             print(f"Inpaint Real Pool (doubao src): {len(inpaint_real)} [NO SAMPLING - ALL USED]")
             print(f"Regular Real Pool: {len(regular_real)}")
 
@@ -196,16 +202,19 @@ class SDXLDataCollector:
         val_data = flatten(val_keys)
         test_data = flatten(test_keys)
 
-        # 仅对训练集做 Doubao 加权复制，避免 val/test 出现重复样本污染评估
+        # 仅对训练集做局部编辑样本加权复制，避免 val/test 出现重复样本污染评估
         weight_int = max(1, int(doubao_weight))
         if weight_int > 1:
-            doubao_train = [
+            local_edit_train = [
                 item for item in train_data
-                if '/doubao/' in item[0].lower().replace('\\', '/')
+                if any(
+                    token in item[0].lower().replace('\\', '/')
+                    for token in ('/doubao/',)  # Removed change duplication to avoid over-fitting and overwhelming the dataset
+                )
             ]
-            if doubao_train:
-                train_data = train_data + doubao_train * (weight_int - 1)
-                print(f"[Train-only Weight] Added {len(doubao_train) * (weight_int - 1)} duplicated Doubao samples (weight={weight_int})")
+            if local_edit_train:
+                train_data = train_data + local_edit_train * (weight_int - 1)
+                print(f"[Train-only Weight] Added {len(local_edit_train) * (weight_int - 1)} duplicated local-edit samples (weight={weight_int})")
         
         print(f"[Split] Total groups: {total_groups}. Train: {len(train_keys)}, Val: {len(val_keys)}, Test: {len(test_keys)}")
         

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LaTF (LaRE + TruFor Fusion) - 环境检查脚本
+LaTF (LaRE + FLH Fusion) - 环境检查脚本
 验证所有必要的文件、路径和配置是否正确
 """
 
@@ -83,32 +83,36 @@ def check_gpu():
         print("✗ GPU不可用，将使用CPU训练（速度会很慢）")
         return False
 
-def check_trufor():
-    """检查TruFor配置"""
-    print("\n检查TruFor配置:")
+def check_flh():
+    """检查 FLH 配置"""
+    print("\n检查 FLH (取证定位头) 配置:")
     
-    # 检查TruFor权重文件
-    trufor_path = Path("项目参考/TruFor-main/TruFor_train_test/pretrained_models/trufor.pth.tar")
-    if trufor_path.exists():
-        print(f"✓ TruFor权重文件: {trufor_path}")
-        print(f"  大小: {trufor_path.stat().st_size:,} 字节")
+    # 检查 FLH 模块文件
+    flh_module = Path("service/forensic_localization.py")
+    if flh_module.exists():
+        print(f"✓ FLH 模块文件: {flh_module}")
     else:
-        print(f"✗ TruFor权重文件不存在: {trufor_path}")
-        print("  请下载: https://www.grip.unina.it/download/prog/TruFor/TruFor_weights.zip")
-        print("  解压到: 项目参考/TruFor-main/TruFor_train_test/pretrained_models/")
+        print(f"✗ FLH 模块文件不存在: {flh_module}")
         return False
     
-    # 检查TruFor特征图目录
-    trufor_maps = Path("trufor_maps/data")
-    if trufor_maps.exists():
-        subdirs = [d.name for d in trufor_maps.iterdir() if d.is_dir()]
-        print(f"✓ TruFor特征图目录: {trufor_maps}")
-        print(f"  包含子目录: {', '.join(subdirs)}")
-        return True
+    # 检查 FLH 训练脚本
+    flh_train = Path("script/7_train_localization.py")
+    if flh_train.exists():
+        print(f"✓ FLH 训练脚本: {flh_train}")
     else:
-        print(f"✗ TruFor特征图目录不存在: {trufor_maps}")
-        print("  请运行: python script\\5_gen_trufor_maps.py")
+        print(f"✗ FLH 训练脚本不存在: {flh_train}")
         return False
+    
+    # 检查 FLH 权重文件
+    flh_weights = Path("outputs/flh_localization.pth")
+    if flh_weights.exists():
+        print(f"✓ FLH 权重文件: {flh_weights}")
+        print(f"  大小: {flh_weights.stat().st_size:,} 字节")
+    else:
+        print(f"⚠ FLH 权重文件不存在: {flh_weights}")
+        print("  请运行: python script\\7_train_localization.py")
+    
+    return True
 
 def check_data_structure():
     """检查数据结构"""
@@ -155,8 +159,8 @@ def check_env_config():
         "DOUBAO_SAMPLE_RATIO": "Doubao采样比例",
         "REGULAR_SAMPLE_RATIO": "常规数据采样比例",
         "DOUBAO_VAL_RATIO": "验证集Doubao比例",
-        "USE_TRUFOR": "启用TruFor",
-        "TRUFOR_LOSS_WEIGHT": "TruFor损失权重",
+        "USE_FLH": "启用FLH定位头",
+        "FLH_LOSS_WEIGHT": "FLH损失权重",
         "BATCH_SIZE": "批次大小",
         "LR": "学习率",
         "OUT_DIR": "输出目录"
@@ -184,8 +188,8 @@ def main():
     # 检查GPU
     gpu_ok = check_gpu()
     
-    # 检查TruFor
-    trufor_ok = check_trufor()
+    # 检查 FLH
+    flh_ok = check_flh()
     
     # 检查数据结构
     data_ok = check_data_structure()
@@ -198,7 +202,7 @@ def main():
     scripts = [
         ("script/1_gen_annotations.py", "标注生成脚本"),
         ("script/2_extract_features.py", "特征提取脚本"),
-        ("script/5_gen_trufor_maps.py", "TruFor特征生成脚本"),
+        ("script/7_train_localization.py", "FLH定位头训练脚本"),
         ("script/5_train_model_v11.py", "V11训练脚本"),
         ("test/evaluate_by_category.py", "评估脚本"),
         ("service/data_prep.py", "数据准备模块"),
@@ -219,22 +223,21 @@ def main():
     print("检查结果总结:")
     print(f"Python包: {'✓ 通过' if packages_ok else '✗ 失败'}")
     print(f"GPU配置: {'✓ 通过' if gpu_ok else '⚠ 警告（将使用CPU）'}")
-    print(f"TruFor配置: {'✓ 通过' if trufor_ok else '✗ 失败'}")
+    print(f"FLH配置: {'✓ 通过' if flh_ok else '✗ 失败'}")
     print(f"数据结构: {'✓ 通过' if data_ok else '✗ 失败'}")
     print(f"环境配置: {'✓ 通过' if env_ok else '✗ 失败'}")
     print(f"脚本文件: {'✓ 通过' if scripts_ok else '✗ 失败'}")
     print("="*80)
     
-    if all([packages_ok, trufor_ok, data_ok, env_ok, scripts_ok]):
+    if all([packages_ok, flh_ok, data_ok, env_ok, scripts_ok]):
         print("\n✅ 所有检查通过！可以开始训练。")
         print("运行命令: python train_full_pipeline.py")
     else:
         print("\n⚠ 存在一些问题，请根据上面的提示修复。")
-        if not trufor_ok:
-            print("\nTruFor问题解决方案:")
-            print("1. 下载权重: https://www.grip.unina.it/download/prog/TruFor/TruFor_weights.zip")
-            print("2. 解压到: 项目参考/TruFor-main/TruFor_train_test/pretrained_models/")
-            print("3. 运行: python script\\5_gen_trufor_maps.py")
+        if not flh_ok:
+            print("\nFLH问题解决方案:")
+            print("1. 确保 service/forensic_localization.py 存在")
+            print("2. 运行: python script\\7_train_localization.py")
         
         if not data_ok:
             print("\n数据结构问题解决方案:")

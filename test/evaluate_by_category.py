@@ -7,6 +7,10 @@ from pathlib import Path
 from tqdm import tqdm
 from dotenv import load_dotenv
 import collections
+try:
+    from torch.amp import autocast
+except ImportError:
+    from torch.cuda.amp import autocast
 
 import shutil
 from PIL import Image, ImageDraw, ImageFont
@@ -19,7 +23,7 @@ load_dotenv(PROJECT_ROOT / '.env')
 from service.dataset import ImageDataset
 from service.model_v11_fusion import LaREDeepFakeV11
 
-def evaluate_category_accuracy(model_path=None):
+def evaluate_category_accuracy(model_path=None, test_file=''):
     # 1. Configuration
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -49,20 +53,24 @@ def evaluate_category_accuracy(model_path=None):
     # 2. Load Validation & Test Lists (Combine them for robust evaluation)
     # We deliberately EXCLUDE training set to avoid "cheating"
     # Try multiple possible annotation files
-    possible_files = [
-        "annotation/val_sdxl.txt",
-        "annotation/test_sdxl.txt",
-        "annotation/val_doubao_focused.txt",
-        "annotation/test_doubao_focused.txt",
-        "annotation/val_sdxl_local.txt",
-        "annotation/test_sdxl_local.txt"
-    ]
-    
-    files_to_test = []
-    for f in possible_files:
-        if os.path.exists(f):
-            files_to_test.append(f)
-            print(f"Found annotation file: {f}")
+    if test_file and os.path.exists(test_file):
+        files_to_test = [test_file]
+        print(f"Using specified test file: {test_file}")
+    else:
+        possible_files = [
+            "annotation/test_v2.txt",
+            "annotation/val_sdxl.txt",
+            "annotation/test_sdxl.txt",
+            "annotation/val_doubao_focused.txt",
+            "annotation/test_doubao_focused.txt",
+            "annotation/val_sdxl_local.txt",
+            "annotation/test_sdxl_local.txt"
+        ]
+        files_to_test = []
+        for f in possible_files:
+            if os.path.exists(f):
+                files_to_test.append(f)
+                print(f"Found annotation file: {f}")
     
     if not files_to_test:
         print("Error: No annotation files found!")
@@ -178,13 +186,15 @@ def evaluate_category_accuracy(model_path=None):
             data_size=448,
             highres_size=512,
             enable_v11=True, # V12
-            enable_trufor=True, # [V13] Enable TruFor
+            enable_luma=True, # [V15] Enable Luma (replaces TruFor)
             is_train=False,
             drop_no_map=False
         )
         dataset.set_val_mode(True)
         
-        loader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=2) # Small workers for small batches
+        loader = DataLoader(dataset, batch_size=24, shuffle=False, num_workers=4,
+                            pin_memory=True, persistent_workers=True,
+                            prefetch_factor=4)
         if len(loader) == 0:
             print(f"[Warning] {cat_name} loader is empty, skip.")
             results[cat_name] = {
@@ -204,24 +214,23 @@ def evaluate_category_accuracy(model_path=None):
         
         with torch.no_grad():
             for batch in tqdm(loader, desc=cat_name):
-                # Handle varying unpacking (V12 vs V11)
-                # V12: img, label, map, highres, mask
-                # V11: img, label, map, highres
-                # V13: img, label, map, highres, mask, trufor
-                img_clip = batch[0].to(device)
-                labels = batch[1].to(device)
-                loss_maps = batch[2].to(device)
+                # V15: img, label, map, highres, mask, luma
+                img_clip = batch[0].to(device, non_blocking=True)
+                labels = batch[1].to(device, non_blocking=True)
+                loss_maps = batch[2].to(device, non_blocking=True)
                 
                 img_highres = None
                 if len(batch) >= 4:
-                    img_highres = batch[3].to(device)
+                    img_highres = batch[3].to(device, non_blocking=True)
                     
-                trufor = None
+                luma = None
                 if len(batch) >= 6:
-                    trufor = batch[5].to(device)
+                    luma = batch[5].to(device, non_blocking=True)
                 
-                # Forward
-                logits = model(img_clip, img_highres, loss_maps, trufor_map=trufor)
+                # Forward [V17 Perf: AMP 推理]
+                amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                with autocast('cuda', dtype=amp_dtype):
+                    logits = model(img_clip, img_highres, loss_maps, luma_map=luma)
                 preds = torch.argmax(logits, dim=1)
                 
                 # Stats
@@ -370,5 +379,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, help='Path to model checkpoint')
+    parser.add_argument('--test_file', type=str, default='', help='Path to test annotation file (overrides auto-discovery)')
     args = parser.parse_args()
-    evaluate_category_accuracy(model_path=args.model)
+    evaluate_category_accuracy(model_path=args.model, test_file=args.test_file)

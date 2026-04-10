@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.nn.utils import clip_grad_norm_
 try:
     from torch.amp import autocast, GradScaler
@@ -38,8 +38,41 @@ def set_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        # [V17 Perf] 输入尺寸固定 → benchmark=True 让 cuDNN 自动选最快卷积算法
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
+
+# [V17 Perf] 全局初始化 seg_criterion，避免每 epoch 重复 import + 创建
+from service.forensic_localization import FLHLoss
+_seg_criterion = FLHLoss(focal_weight=0.5, dice_weight=0.5)
+
+
+def compute_multiscale_seg_loss(seg_outputs, masks, seg_criterion, args):
+    if isinstance(seg_outputs, (tuple, list)) and len(seg_outputs) == 3:
+        coarse_logits, mid_logits, fine_logits = seg_outputs
+    else:
+        fine_logits = seg_outputs
+        mid_logits = F.interpolate(fine_logits, size=(64, 64), mode='bilinear', align_corners=False)
+        coarse_logits = F.interpolate(fine_logits, size=(32, 32), mode='bilinear', align_corners=False)
+
+    masks_32 = F.interpolate(masks, size=coarse_logits.shape[-2:], mode='nearest')
+    masks_64 = F.interpolate(masks, size=mid_logits.shape[-2:], mode='nearest')
+    masks_128 = F.interpolate(masks, size=fine_logits.shape[-2:], mode='nearest')
+
+    loss_32 = seg_criterion(coarse_logits, masks_32)
+    loss_64 = seg_criterion(mid_logits, masks_64)
+    loss_128 = seg_criterion(fine_logits, masks_128)
+    total_loss = (
+        args.seg_weight_32 * loss_32
+        + args.seg_weight_64 * loss_64
+        + args.seg_weight_128 * loss_128
+    )
+
+    return total_loss, {
+        'coarse': loss_32,
+        'mid': loss_64,
+        'fine': loss_128,
+    }
 
 def train_one_epoch(model, loader, optimizer, scaler, criterion, device, epoch, writer, args):
     model.train()
@@ -48,24 +81,26 @@ def train_one_epoch(model, loader, optimizer, scaler, criterion, device, epoch, 
     total_loss = 0
     total_cls_loss = 0
     total_seg_loss = 0
+    total_seg_loss_32 = 0
+    total_seg_loss_64 = 0
+    total_seg_loss_128 = 0
     correct = 0
     total = 0
     
     # AutoCast settings
     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     
-    # [V12] Seg Loss
-    seg_criterion = nn.BCEWithLogitsLoss()
+    seg_criterion = _seg_criterion
     
     for i, batch in enumerate(loader):
         # [V13] Unified Unpacking Logic
-        # V13: (img_clip, label, loss_map, img_highres, mask, trufor) -> len 6
+        # V13: (img_clip, label, loss_map, img_highres, mask, luma) -> len 6
         # V12: (img_clip, label, loss_map, img_highres, mask) -> len 5
         # V11: (img_clip, label, loss_map, img_highres) -> len 4
         
         batch_len = len(batch)
         masks = None
-        trufor = None
+        luma = None
         use_seg = False
         
         img_clip = batch[0].to(device, non_blocking=True)
@@ -81,42 +116,60 @@ def train_one_epoch(model, loader, optimizer, scaler, criterion, device, epoch, 
              use_seg = True
              
         if batch_len >= 6:
-             # V13 TruFor
-             trufor = batch[5].to(device, non_blocking=True)
+             # V13 Luma map (replaces TruFor)
+             luma = batch[5].to(device, non_blocking=True)
 
         # [V14] 豆包真图非对称惩罚：提取路径，对 label=0 且路径含 doubao 的样本施加更高权重
         img_paths = batch[-1]  # dataset 末位始终追加 path 字符串
         sample_weights = torch.ones(labels.size(0), device=device)
-        doubao_real_w = getattr(args, 'doubao_real_weight', 3.0)
+        doubao_real_w = getattr(args, 'doubao_real_weight', 2.0)
         for _j, (_p, _lbl) in enumerate(zip(img_paths, labels.cpu().tolist())):
             if _lbl == 0 and 'doubao' in _p.lower().replace('\\', '/'):
                 sample_weights[_j] = doubao_real_w
 
         optimizer.zero_grad()
-        
+
         with autocast('cuda', dtype=amp_dtype, enabled=args.use_amp):
-            # Forward Pass: Dual Stream + LaRE + Seg Head + [V13 TruFor]
+            # [V17] Forward Pass: Dual Stream + LaRE + Integrated Localization
             if use_seg:
-                # Pass TruFor map if available (V13)
-                logits, seg_logits = model(img_clip, img_highres, loss_maps, trufor_map=trufor, return_seg=True)
-                
+                # 计算定位损失的白名单逻辑:
+                # 1. 标签为 0 的真图 (强制空 mask, 惩罚 FP)
+                # 2. 有实际局部掩码的假图 (Change, Doubao)
+                # 屏蔽: 无掩码的全图假图 (如 SDXL/Flux), 避免全红热图干扰定位
+                has_mask = (labels == 0) | (masks.sum(dim=(1, 2, 3)) > 0)  # [B] bool
+                need_pyramid = has_mask.any().item()
+
+                if need_pyramid:
+                    logits, seg_outputs = model(
+                        img_clip, img_highres, loss_maps,
+                        luma_map=luma, return_seg_pyramid=True,
+                    )
+                else:
+                    logits = model(img_clip, img_highres, loss_maps, luma_map=luma)
+                    seg_outputs = None
+
                 # [V14] 逐样本加权交叉熵（豆包真图惩罚倍率 doubao_real_weight）
                 cls_loss_raw = F.cross_entropy(logits, labels, label_smoothing=0.1, reduction='none')
                 cls_loss = (cls_loss_raw * sample_weights).mean()
-                
-                # [V12] Segmentation Loss
-                # Resize mask to match seg_logits size (32x32) for efficiency
-                # masks shape: [B, 1, 512, 512] -> [B, 1, 32, 32]
-                masks_small = torch.nn.functional.interpolate(masks, size=(32, 32), mode='nearest')
-                seg_loss = seg_criterion(seg_logits, masks_small)
-                
-                # Joint Loss
-                loss = cls_loss + 0.5 * seg_loss
-                
-                total_seg_loss += seg_loss.item()
+
+                if need_pyramid and seg_outputs is not None:
+                    # 只用有 mask 的样本计算 seg loss
+                    seg_outputs_masked = tuple(s[has_mask] for s in seg_outputs)
+                    masks_masked = masks[has_mask]
+                    seg_loss, seg_stats = compute_multiscale_seg_loss(seg_outputs_masked, masks_masked, seg_criterion, args)
+                    seg_loss = seg_loss * args.seg_loss_scale
+                    loss = cls_loss + seg_loss
+                    total_seg_loss += seg_loss.item()
+                    total_seg_loss_32 += seg_stats['coarse'].item()
+                    total_seg_loss_64 += seg_stats['mid'].item()
+                    total_seg_loss_128 += seg_stats['fine'].item()
+                else:
+                    loss = cls_loss
+
                 total_cls_loss += cls_loss.item()
             else:
-                logits = model(img_clip, img_highres, loss_maps, trufor_map=trufor)
+                logits = model(img_clip, img_highres, loss_maps,
+                               luma_map=luma)
                 loss_raw = F.cross_entropy(logits, labels, label_smoothing=0.1, reduction='none')
                 loss = (loss_raw * sample_weights).mean()
                 total_cls_loss += loss.item()
@@ -146,7 +199,11 @@ def train_one_epoch(model, loader, optimizer, scaler, criterion, device, epoch, 
         if i % 20 == 0:
             msg = f"Epoch [{epoch}] Step [{i}/{len(loader)}] Loss: {loss.item():.4f}"
             if use_seg:
-                msg += f" (Cls: {cls_loss.item():.4f}, Seg: {seg_loss.item():.4f})"
+                msg += (
+                    f" (Cls: {cls_loss.item():.4f}, Seg: {seg_loss.item():.4f}, "
+                    f"32: {seg_stats['coarse'].item():.4f}, 64: {seg_stats['mid'].item():.4f}, "
+                    f"128: {seg_stats['fine'].item():.4f})"
+                )
             msg += f" Acc: {correct/total:.4f}"
             
             logger.info(msg)
@@ -157,9 +214,14 @@ def train_one_epoch(model, loader, optimizer, scaler, criterion, device, epoch, 
     logger.info(f"Epoch {epoch} Loss: {avg_loss:.4f} Acc: {avg_acc:.4f}")
     writer.add_scalar('Train/Loss', avg_loss, epoch)
     writer.add_scalar('Train/Acc', avg_acc, epoch)
+    if total_seg_loss > 0:
+        writer.add_scalar('Train/SegLoss', total_seg_loss / len(loader), epoch)
+        writer.add_scalar('Train/SegLoss32', total_seg_loss_32 / len(loader), epoch)
+        writer.add_scalar('Train/SegLoss64', total_seg_loss_64 / len(loader), epoch)
+        writer.add_scalar('Train/SegLoss128', total_seg_loss_128 / len(loader), epoch)
     return avg_loss, avg_acc
 
-def evaluate(model, loader, criterion, device, epoch, writer):
+def validate(model, loader, criterion, device, epoch, writer):
     model.eval()
     loader.dataset.set_val_mode(True)
     
@@ -175,28 +237,30 @@ def evaluate(model, loader, criterion, device, epoch, writer):
         for batch in loader:
             # [V13] Unified Unpacking Logic
             batch_len = len(batch)
-            img_clip = batch[0].to(device)
-            labels = batch[1].to(device).view(-1)
-            loss_maps = batch[2].to(device)
+            img_clip = batch[0].to(device, non_blocking=True)
+            labels = batch[1].to(device, non_blocking=True).view(-1)
+            loss_maps = batch[2].to(device, non_blocking=True)
             
             img_highres = None
             masks = None
-            trufor = None
+            luma = None
             
             if batch_len >= 4:
-                img_highres = batch[3].to(device)
+                img_highres = batch[3].to(device, non_blocking=True)
             if batch_len >= 5:
                 # Mask not really used in eval loop unless we evaluate iou, but skipping for now
                 pass
             if batch_len >= 6:
-                # V13 TruFor
-                trufor = batch[5].to(device)
+                # V13 Luma map (replaces TruFor)
+                luma = batch[5].to(device, non_blocking=True)
+
+            # [V17] Forward — no external FLH (AMP for val too)
+            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            with autocast('cuda', dtype=amp_dtype, enabled=True):
+                logits = model(img_clip, img_highres, loss_maps, luma_map=luma)
+                loss = criterion(logits, labels)
             
-            # Forward
-            logits = model(img_clip, img_highres, loss_maps, trufor_map=trufor)
-            loss = criterion(logits, labels)
-            
-            probs = torch.softmax(logits, dim=1)[:, 1] # Probability of class 1 (AI)
+            probs = torch.softmax(logits.float(), dim=1)[:, 1] # Probability of class 1 (AI)
             
             total_loss += loss.item()
             preds = torch.argmax(logits, dim=1)
@@ -204,7 +268,7 @@ def evaluate(model, loader, criterion, device, epoch, writer):
             total += labels.size(0)
             
             all_labels.extend(labels.cpu().numpy())
-            all_probs.extend(probs.cpu().numpy())
+            all_probs.extend(probs.cpu().float().numpy())
             all_preds.extend(preds.cpu().numpy())
             
     # 防止验证集为空的情况
@@ -220,6 +284,27 @@ def evaluate(model, loader, criterion, device, epoch, writer):
         writer.add_scalar('Val/Loss', avg_loss, epoch)
         writer.add_scalar('Val/Acc', avg_acc, epoch)
     return avg_loss, avg_acc, all_labels, all_probs, all_preds
+
+
+def build_optimizer(model, lr, weight_decay=0.01):
+    return optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+
+
+def build_scheduler(optimizer, total_epochs, eta_min=1e-6, warmup_epochs=0):
+    if warmup_epochs > 0:
+        from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+        warmup = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
+        cosine = CosineAnnealingLR(optimizer, T_max=max(1, total_epochs - warmup_epochs), eta_min=eta_min)
+        return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+    return optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, total_epochs),
+        eta_min=eta_min,
+    )
 
 def main():
     parser = argparse.ArgumentParser(description='Train LaRE V11 Fusion Model')
@@ -237,8 +322,32 @@ def main():
     parser.add_argument('--clip_type', type=str, default=os.getenv('CLIP_TYPE', 'RN50x64'), help='CLIP visual backbone')
     parser.add_argument('--highres_size', type=int, default=int(os.getenv('HIGHRES_SIZE', '512')))
     parser.add_argument('--doubao_real_weight', type=float,
-                        default=float(os.getenv('DOUBAO_REAL_WEIGHT', '3.0')),
+                        default=float(os.getenv('DOUBAO_REAL_WEIGHT', '2.0')),
                         help='豆包真图(label=0)被误判时的损失惩罚倍率')
+    parser.add_argument('--num_workers', type=int, default=int(os.getenv('WORKERS', '8')),
+                        help='DataLoader CPU worker 数量，建议设为 CPU 核数的一半')
+    parser.add_argument('--seg_loss_scale', type=float,
+                        default=float(os.getenv('SEG_LOSS_SCALE', '1.0')),
+                        help='Global scaling factor for total seg loss (cls:seg balance)')
+    parser.add_argument('--warmup_epochs', type=int,
+                        default=int(os.getenv('WARMUP_EPOCHS', '3')),
+                        help='Linear warmup epochs before cosine decay')
+    parser.add_argument('--seg_weight_32', type=float,
+                        default=float(os.getenv('SEG_WEIGHT_32', '0.15')),
+                        help='32x32 coarse localization loss weight')
+    parser.add_argument('--seg_weight_64', type=float,
+                        default=float(os.getenv('SEG_WEIGHT_64', '0.25')),
+                        help='64x64 mid localization loss weight')
+    parser.add_argument('--seg_weight_128', type=float,
+                        default=float(os.getenv('SEG_WEIGHT_128', '0.50')),
+                        help='128x128 fine localization loss weight')
+    parser.add_argument('--freeze_loc_epochs', type=int,
+                        default=int(os.getenv('FREEZE_LOC_EPOCHS', '0')),
+                        help='Freeze localization branch for first N epochs to preserve cls dynamics')
+    parser.add_argument('--stage3_finetune', action='store_true',
+                        help='Stage 3: Freeze texture/CLIP/FLH, only train loc_refine and fusion_mlp')
+    parser.add_argument('--resume', type=str, default='',
+                        help='Path to a checkpoint (.pth) to resume/finetune from')
 
     args = parser.parse_args()
     set_seed(args.seed)
@@ -253,7 +362,7 @@ def main():
     logger.info(f"Using device: {device}")
     
     # Dataset (V11 Mode)
-    logger.info("Initializing Datasets (V11 Dual-Stream + V13 TruFor Fusion)...")
+    logger.info("Initializing Datasets (V11 Dual-Stream + V15 FLH Fusion)...")
     train_dataset = ImageDataset(
         data_root=args.data_root,
         train_file=args.train_file,
@@ -261,7 +370,7 @@ def main():
         data_size=448,          # For CLIP
         highres_size=args.highres_size, # For Texture
         enable_v11=True,        # ENABLE V11
-        enable_trufor=True,     # ENABLE V13 TruFor
+        enable_luma=True,       # ENABLE V15 Luma (replaces TruFor)
         is_train=True
     )
     
@@ -272,18 +381,45 @@ def main():
         data_size=448,
         highres_size=args.highres_size,
         enable_v11=True,
-        enable_trufor=True,     # ENABLE V13 TruFor
+        enable_luma=True,       # ENABLE V15 Luma (replaces TruFor)
         is_train=False,
         drop_no_map=False
     )
     
+    # [V18] WeightedRandomSampler: 提高有 mask 样本的采样概率
+    # change/doubao 样本权重更高，保证每 batch ~60% 有 mask 的定位数据
+    mask_boost = float(os.getenv('MASK_SAMPLE_WEIGHT', '2.0'))
+    sample_weights_list = []
+    for path, _label in train_dataset.train_list:
+        path_lower = path.lower().replace('\\', '/')
+        if '/change/' in path_lower or '/doubao/' in path_lower:
+            sample_weights_list.append(mask_boost)
+        else:
+            sample_weights_list.append(1.0)
+    train_sampler = WeightedRandomSampler(
+        weights=sample_weights_list,
+        num_samples=len(sample_weights_list),
+        replacement=True,
+    )
+    n_mask = sum(1 for w in sample_weights_list if w > 1.0)
+    logger.info(
+        f"[V18] WeightedRandomSampler: {len(sample_weights_list)} samples, "
+        f"{n_mask} with mask (weight={mask_boost}), "
+        f"{len(sample_weights_list) - n_mask} without mask (weight=1.0)"
+    )
+
+    # [V17 Perf] prefetch_factor=4 让 worker 预加载更多 batch，减少 GPU 等待
+    _nw_train = args.num_workers
+    _nw_val = max(0, args.num_workers // 2)
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, 
-        num_workers=8, pin_memory=True, persistent_workers=True
+        train_dataset, batch_size=args.batch_size, sampler=train_sampler,
+        num_workers=_nw_train, pin_memory=True, persistent_workers=(_nw_train > 0),
+        prefetch_factor=4 if _nw_train > 0 else None
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False, 
-        num_workers=4, pin_memory=True
+        num_workers=_nw_val, pin_memory=True, persistent_workers=(_nw_val > 0),
+        prefetch_factor=4 if _nw_val > 0 else None
     )
     
     # Model
@@ -293,11 +429,78 @@ def main():
         clip_type=args.clip_type, 
         texture_model=args.texture_model
     ).to(device)
+
+    if args.resume and os.path.exists(args.resume):
+        logger.info(f"Loading checkpoint from: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
+        msg = model.load_state_dict(state_dict, strict=False)
+        logger.info(f"Checkpoint loaded. {msg}")
+
+    # [V17] FLH is now integrated into the model — no external loading needed
+
+    # [V14] Localization branch freeze: identify all loc-only parameters
+    _LOC_PREFIXES = (
+        'luma_gate_loc.', 'ch_interact_loc.',
+        'loc_stem.', 'loc_cbam1.', 'loc_cbam2.', 'loc_cbam3.', 'loc_head.',
+        'loc_refine64.', 'loc_refine128.', 'mid_head.', 'fine_head.',
+    )
+
+    def _set_stage3_requires_grad(model):
+        """
+        [V14] Stage 3 Multi-stage Finetuning: 
+        Freeze EVERYTHING (texture_branch, clip, luma_gate_loc, loc_stem, loc_cbam, loc_head, lare_conv)
+        ONLY train loc_refine64, loc_refine128, mid_head, fine_head, and possibly fusion_mlp.
+        """
+        for param in model.parameters():
+            param.requires_grad = False
+        
+        # Unfreeze the refinement layers, final heads, AND coarse attention blocks
+        unfreeze_names = [
+            'loc_refine64', 'loc_refine128', 'mid_head', 'fine_head',
+            'fusion_mlp', 'loc_head',
+        ]
+        for name, module in model.named_modules():
+            if name in unfreeze_names:
+                for param in module.parameters():
+                    param.requires_grad = True
+
+    def _set_loc_requires_grad(model, requires_grad):
+        """Set requires_grad for all localization-only parameters."""
+        count = 0
+        for name, param in model.named_parameters():
+            if name.startswith(_LOC_PREFIXES):
+                param.requires_grad = requires_grad
+                count += 1
+        tag = "Unfroze" if requires_grad else "Froze"
+        logger.info(f"{tag} {count} localization parameters")
+
+    loc_frozen = False
+    
+    if args.stage3_finetune:
+        _set_stage3_requires_grad(model)
+        logger.info("[V14] STAGE 3 FINETUNE ENABLED: Froze base feature extractors and FLH head. Only training loc_refine blocks and fusion head.")
+    elif args.freeze_loc_epochs > 0:
+        _set_loc_requires_grad(model, False)
+        loc_frozen = True
+        logger.info(f"[V14] Localization branch frozen for first {args.freeze_loc_epochs} epochs")
+    
+    # [V17 Perf] torch.compile 仅在 Linux + Triton 可用时启用（Windows 不支持 Triton）
+    import platform
+    if platform.system() != 'Windows' and hasattr(torch, 'compile'):
+        try:
+            model = torch.compile(model, mode='reduce-overhead')
+            logger.info("torch.compile enabled (reduce-overhead)")
+        except Exception as e:
+            logger.warning(f"torch.compile failed, fallback to eager: {e}")
+    else:
+        logger.info("torch.compile skipped (Windows/Triton not available)")
     
     # Optimizer (Typically AdamW for ViTs/ConvNeXts)
     # CLIP is frozen by default inside model __init__, so only Texture + Heads are trained.
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=0.01)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    optimizer = build_optimizer(model, args.lr, weight_decay=0.01)
+    _warmup = args.warmup_epochs if args.stage3_finetune else 0
+    scheduler = build_scheduler(optimizer, args.epochs, eta_min=1e-6, warmup_epochs=_warmup)
     scaler = GradScaler() if args.use_amp else None
     
     # Label Smoothing
@@ -309,6 +512,12 @@ def main():
     # Early Stopping setup
     early_stop_patience = int(os.getenv('EARLY_STOP_PATIENCE', 6))
     no_improve_epochs = 0
+    early_stop_start_epoch = max(1, args.freeze_loc_epochs + 1)
+    if args.freeze_loc_epochs > 0:
+        logger.info(
+            f"[V14] Early stopping will start after epoch {args.freeze_loc_epochs} "
+            f"(monitoring begins at epoch {early_stop_start_epoch})"
+        )
     
     # Track statistics
     history = {
@@ -322,8 +531,22 @@ def main():
     }
     
     for epoch in range(1, args.epochs + 1):
+        # [V14] Unfreeze localization branch after freeze period
+        if loc_frozen and epoch > args.freeze_loc_epochs:
+            _set_loc_requires_grad(model, True)
+            loc_frozen = False
+            current_lr = scheduler.get_last_lr()[0]
+            remaining_epochs = args.epochs - epoch + 1
+            optimizer = build_optimizer(model, current_lr, weight_decay=0.01)
+            scheduler = build_scheduler(optimizer, remaining_epochs, eta_min=1e-6)
+            no_improve_epochs = 0
+            logger.info(
+                f"[V14] Localization unfrozen at epoch {epoch}; rebuilt optimizer/scheduler "
+                f"with lr={current_lr:.6f}, remaining_epochs={remaining_epochs}"
+            )
+
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, scaler, criterion, device, epoch, writer, args)
-        val_loss, val_acc, val_labels, val_probs, val_preds = evaluate(model, val_loader, criterion, device, epoch, writer)
+        val_loss, val_acc, val_labels, val_probs, val_preds = validate(model, val_loader, criterion, device, epoch, writer)
         scheduler.step()
         
         # Save history
@@ -348,14 +571,20 @@ def main():
                 'best_acc': best_acc,
             }, out_dir / 'best.pth')
         else:
-            no_improve_epochs += 1
-            logger.info(f"No improvement for {no_improve_epochs} epochs. Best Acc: {best_acc:.4f}")
+            if epoch >= early_stop_start_epoch:
+                no_improve_epochs += 1
+                logger.info(f"No improvement for {no_improve_epochs} epochs. Best Acc: {best_acc:.4f}")
+            else:
+                logger.info(
+                    f"No improvement at epoch {epoch}, but early stopping is disabled during "
+                    f"localization freeze phase (starts at epoch {early_stop_start_epoch})."
+                )
             
         # Save Latest
         torch.save(model.state_dict(), out_dir / 'latest.pth')
         
         # Early Stopping Check
-        if no_improve_epochs >= early_stop_patience:
+        if epoch >= early_stop_start_epoch and no_improve_epochs >= early_stop_patience:
             logger.info(f"Early stopping triggered! No improvement for {early_stop_patience} epochs.")
             break
         

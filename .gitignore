@@ -102,6 +102,7 @@ knowledge_base/raw/
 *.xlsx
 annotation/temp_*.txt
 annotation/debug_*.txt
+annotation/_all_for_extract.txt
 
 # ============================================
 # 操作系统特定文件

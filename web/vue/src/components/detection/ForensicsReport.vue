@@ -7,9 +7,9 @@
  * 1. 会话信息（平台、买卖双方、纠纷标题）
  * 2. 消息上下文展示
  * 3. 多图片鉴定结果对比
- * 4. 三图对比展示（原图、LaRE热力图、TruFor热力图）
+ * 4. 三图对比展示（原图、LaRE热力图、定位热力图）
  * 5. 检测结论摘要表格
- * 6. TruFor物证分析详情
+ * 6. 定位物证分析详情
  * 7. Qwen-VL逻辑审计结论
  * 8. 违规条款匹配（平台规则）
  */
@@ -73,8 +73,8 @@ const props = defineProps<{
     originalImage?: string | null;
     // 兼容旧接口：LaRE热力图
     lareHeatmap?: string | null;
-    // 兼容旧接口：TruFor热力图
-    truforHeatmap?: string | null;
+    // 定位热力图
+    localizationHeatmap?: string | null;
     // 兼容旧接口：检测结果
     detectionResult?: any | null;
     // 兼容旧接口：VLM报告
@@ -146,10 +146,9 @@ const currentLareHeatmap = computed(() => {
     return props.lareHeatmap || props.currentDetectResult?.heatmap || null;
 });
 
-// 获取当前选中的TruFor热力图（如果有）
-const currentTruforHeatmap = computed(() => {
-    // TruFor热力图目前只在后端debug中返回，前端暂未获取
-    return props.truforHeatmap || null;
+// 获取当前选中的定位热力图
+const currentLocalizationHeatmap = computed(() => {
+    return props.localizationHeatmap || null;
 });
 
 // 获取当前VLM报告
@@ -283,8 +282,8 @@ const matchedRules = computed(() => {
     ];
 });
 
-// TruFor分析数据
-const truforAnalysis = computed(() => {
+// 定位分析数据
+const localizationAnalysis = computed(() => {
     const detection = currentDetection.value;
     let cascadeInfo = null;
     
@@ -366,7 +365,7 @@ const detectionStats = computed(() => {
 const modelInfo = computed(() => ({
     latf: 'LaTF v13',
     lare: 'SDXL',
-    trufor: 'V1.0',
+    localization: 'V14 FLH',
     clip: 'RN50x64'
 }));
 </script>
@@ -539,17 +538,17 @@ const modelInfo = computed(() => ({
                                     <div class="item-desc">AI生成痕迹定位</div>
                                 </div>
 
-                                <!-- TruFor物证热力图 -->
+                                <!-- 定位物证热力图 -->
                                 <div class="comparison-item">
-                                    <div class="item-label trufor">
+                                    <div class="item-label localization">
                                         <i class="fa-solid fa-fingerprint"></i>
-                                        <span>TruFor热力图</span>
+                                        <span>定位热力图</span>
                                     </div>
                                     <div class="image-frame">
                                         <img 
-                                            v-if="currentTruforHeatmap" 
-                                            :src="'data:image/jpeg;base64,' + currentTruforHeatmap" 
-                                            alt="TruFor热力图" 
+                                            v-if="currentLocalizationHeatmap" 
+                                            :src="'data:image/jpeg;base64,' + currentLocalizationHeatmap" 
+                                            alt="定位热力图" 
                                             class="preview-img"
                                         />
                                         <div v-else class="image-placeholder">
@@ -722,7 +721,7 @@ const modelInfo = computed(() => ({
                         <span>|</span>
                         <span>LaRE: {{ modelInfo.lare }}</span>
                         <span>|</span>
-                        <span>TruFor: {{ modelInfo.trufor }}</span>
+                        <span>定位: {{ modelInfo.localization }}</span>
                     </div>
                 </div>
             </div>
@@ -1067,7 +1066,7 @@ const modelInfo = computed(() => ({
     color: #f87171;
 }
 
-.item-label.trufor {
+.item-label.localization {
     background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(59, 130, 246, 0.1));
     color: #60a5fa;
 }

@@ -43,20 +43,10 @@ def process_single_image(fake_path_str):
              img_real = cv2.resize(img_real, (img_fake.shape[1], img_fake.shape[0]))
 
         # [Check] Identity Check (Data Integrity)
-        # If images are exactly the same, mask will be empty and training will be confused
+        # If images are exactly the same, skip mask generation (empty mask)
         diff_temp = cv2.absdiff(img_fake, img_real)
         if np.sum(diff_temp) == 0:
-            # [CRITICAL] Delete identical files as requested by user
-            try:
-                # Delete Fake
-                if fake_path.exists():
-                    os.remove(fake_path)
-                # Delete Real
-                if real_path.exists():
-                    os.remove(real_path)
-                return ('deleted', filename)
-            except Exception as e:
-                return ('error_deleting', f"{filename}: {e}")
+            return ('skipped', filename)
 
         # SSIM Calculation
         gray_fake = cv2.cvtColor(img_fake, cv2.COLOR_BGR2GRAY)

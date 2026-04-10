@@ -5,6 +5,48 @@ import clip
 import timm
 import numpy as np
 from PIL import Image
+from service.forensic_localization import (
+    SpatialLuminanceGate, ChannelInteraction, CBAMBlock, SpatialAttention
+)
+
+
+class ConvBNAct(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size=3, stride=1, padding=None):
+        super().__init__()
+        if padding is None:
+            padding = kernel_size // 2
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size, stride=stride, padding=padding, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class LocalizationRefineBlock(nn.Module):
+    """Refine coarse forensic features with high-resolution texture skip features."""
+    def __init__(self, in_ch, skip_ch, out_ch):
+        super().__init__()
+        self.up_proj = ConvBNAct(in_ch, out_ch, kernel_size=3)
+        self.skip_proj = ConvBNAct(skip_ch, out_ch, kernel_size=1, padding=0)
+        self.fuse = ConvBNAct(out_ch * 2, out_ch, kernel_size=3)
+        self.mix = ChannelInteraction(in_ch=out_ch, mid_ch=max(16, out_ch // 2))
+        self.cbam = CBAMBlock(out_ch)
+
+    def forward(self, x, skip):
+        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+        x = self.up_proj(x)
+        shortcut = x  # residual before fusion
+        if skip.shape[-2:] != x.shape[-2:]:
+            skip = F.interpolate(skip, size=x.shape[-2:], mode='bilinear', align_corners=False)
+        skip = self.skip_proj(skip)
+        x = torch.cat([x, skip], dim=1)
+        x = self.fuse(x)
+        x = self.mix(x)
+        x = self.cbam(x)
+        return x + shortcut  # residual connection
 
 # 伪造检测常用的 SRM 滤波器 (高频噪声增强)
 class SRMConv2d(nn.Module):
@@ -58,15 +100,29 @@ class TextureBranch(nn.Module):
         # 加载 timm 模型
         # num_classes=0 表示移除最后的分类头，只取特征
         print(f"[V11] Initializing Texture Branch: {model_name}")
-        self.backbone = timm.create_model(model_name, pretrained=pretrained, num_classes=0)
-        
-        # 获取特征维度 (convnext_tiny=768, efficientnet_b0=1280, etc.)
-        dummy_in = torch.randn(1, 3, 224, 224)
-        with torch.no_grad():
-            dummy_out = self.backbone(dummy_in)
-        self.out_dim = dummy_out.shape[1]
-        
-    def forward(self, x):
+        try:
+            self.backbone = timm.create_model(
+                model_name,
+                pretrained=pretrained,
+                features_only=True,
+                out_indices=(0, 1, 2, 3),
+            )
+            self.features_only = True
+            self.feature_dims = list(self.backbone.feature_info.channels())
+        except Exception:
+            self.backbone = timm.create_model(model_name, pretrained=pretrained, num_classes=0, global_pool='')
+            self.features_only = False
+            dummy_in = torch.randn(1, 3, 224, 224)
+            with torch.no_grad():
+                dummy_features = self.backbone.forward_features(dummy_in)
+            if isinstance(dummy_features, (list, tuple)):
+                self.feature_dims = [feat.shape[1] for feat in dummy_features]
+            else:
+                self.feature_dims = [dummy_features.shape[1]]
+
+        self.out_dim = self.feature_dims[-1]
+
+    def forward(self, x, return_features=False):
         # x: [B, 3, H, W] (High Res, e.g., 512x512)
         
         # 1. 提取高频噪声 (可选)
@@ -80,8 +136,30 @@ class TextureBranch(nn.Module):
             x_in = x
             
         # 2. Backbone 提取
-        features = self.backbone(x_in) # [B, out_dim]
-        return features
+        if self.features_only:
+            feature_maps = self.backbone(x_in)
+        else:
+            raw_features = self.backbone.forward_features(x_in)
+            if isinstance(raw_features, (list, tuple)):
+                feature_maps = list(raw_features)
+            else:
+                feature_maps = [raw_features]
+
+        global_feat = F.adaptive_avg_pool2d(feature_maps[-1], (1, 1)).flatten(1)
+        if not return_features:
+            return global_feat
+
+        if len(feature_maps) == 1:
+            feature_maps = [feature_maps[0], feature_maps[0], feature_maps[0]]
+        elif len(feature_maps) == 2:
+            feature_maps = [feature_maps[0], feature_maps[0], feature_maps[1]]
+
+        pyramid = {
+            'skip_128': feature_maps[0],
+            'skip_64': feature_maps[1],
+            'bridge_32': feature_maps[2],
+        }
+        return global_feat, pyramid
 
 class LaREDeepFakeV11(nn.Module):
     """
@@ -105,26 +183,47 @@ class LaREDeepFakeV11(nn.Module):
         self.texture_branch = TextureBranch(model_name=texture_model, use_srm=True)
         self.texture_dim = self.texture_branch.out_dim
         
-        # --- Stream 3: LaRE Map Processing ---
-        # 简单的卷积层处理 LaRE Map
-        # [V13] Updated to 5 channels (4 LaRE + 1 TruFor)
+        # --- Stream 3: SSFR/LaRE Map Processing ---
+        # [V17] 8 channels (7 SSFR + 1 luma), no external FLH
+        self.luma_gate = SpatialLuminanceGate(n_ssfr=7)   # 逐像素亮度门控
+        self.ch_interact = ChannelInteraction(in_ch=8, mid_ch=16)  # 跨通道关联
+
         self.lare_conv = nn.Sequential(
-            nn.Conv2d(5, 32, kernel_size=3, padding=1),
+            nn.Conv2d(8, 32, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.AdaptiveAvgPool2d((1, 1))
         )
         self.lare_dim = 64
         
-        # --- [V12] Auxiliary Segmentation Head (Pixel-level Supervision) ---
-        # [V13] Updated to 5 channels
-        self.seg_head = nn.Sequential(
-            nn.Conv2d(5, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 16, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 1, 1) # Output: [B, 1, 32, 32] Logits
+        # --- [V14] Localization 独立前处理 (不共享权重，避免 seg loss 污染分类路) ---
+        self.luma_gate_loc = SpatialLuminanceGate(n_ssfr=7)
+        self.ch_interact_loc = ChannelInteraction(in_ch=8, mid_ch=16)
+        
+        # --- [V14] Integrated Localization Head (replaces external FLH + old seg_head) ---
+        self.loc_stem = nn.Sequential(
+            nn.Conv2d(8, 48, 3, padding=1, bias=False),
+            nn.BatchNorm2d(48),
+            nn.ReLU(inplace=True),
         )
+        self.loc_cbam1 = CBAMBlock(48)
+        self.loc_cbam2 = CBAMBlock(48)
+        self.loc_cbam3 = CBAMBlock(48)
+        self.loc_head = nn.Conv2d(48, 1, 1)  # Output: [B, 1, 32, 32] Logits
+
+        # --- [V14] High-Resolution Refinement Decoder ---
+        skip_64_dim = self.texture_branch.feature_dims[1] if len(self.texture_branch.feature_dims) > 1 else self.texture_branch.feature_dims[0]
+        skip_128_dim = self.texture_branch.feature_dims[0]
+        self.loc_refine64 = LocalizationRefineBlock(48, skip_64_dim, 32)
+        self.loc_refine128 = LocalizationRefineBlock(32, skip_128_dim, 24)
+        self.mid_head = nn.Conv2d(32, 1, 1)
+        self.fine_head = nn.Conv2d(24, 1, 1)
+
+        # Zero-init residual refinement heads so old checkpoints fall back to upsampled coarse maps.
+        nn.init.zeros_(self.mid_head.weight)
+        nn.init.zeros_(self.mid_head.bias)
+        nn.init.zeros_(self.fine_head.weight)
+        nn.init.zeros_(self.fine_head.bias)
         
         # --- Fusion Head ---
         fusion_dim = self.clip_dim + self.texture_dim + self.lare_dim
@@ -141,21 +240,21 @@ class LaREDeepFakeV11(nn.Module):
         )
 
         
-    def forward(self, img_clip, img_highres, lare_map, trufor_map=None, return_seg=False):
+    def forward(self, img_clip, img_highres, lare_map, luma_map=None, return_seg=False, return_seg_pyramid=False):
         """
+        [V14] 内嵌定位头，不再需要外部 FLH
         Args:
             img_clip: [B, 3, 448, 448] (for CLIP)
             img_highres: [B, 3, 1024, 1024] or [B, 3, 512, 512] (for Texture Branch)
-            lare_map: [B, 4, 32, 32] (LaRE features)
-            trufor_map: [B, 1, 512, 512] (TruFor prob map) - Optional
-            return_seg: If True, returns segmentation logits mapping
+            lare_map: [B, 7, 32, 32] (SSFR features, 7 channels including VAE recon)
+            luma_map: [B, 1, 32, 32] (Luminance map) - Optional
+            return_seg: If True, returns the fine localization logits mapping
+            return_seg_pyramid: If True, returns (coarse, mid, fine) localization logits
         """
         # 统一转为 float32，避免 bf16/fp16 混合精度导致 torch.cat dtype mismatch 或 NaN
         img_clip = img_clip.float()
         img_highres = img_highres.float()
         lare_map = lare_map.float()
-        if trufor_map is not None:
-            trufor_map = trufor_map.float()
 
         # 1. Semantic Features (CLIP)
         with torch.no_grad():
@@ -164,35 +263,60 @@ class LaREDeepFakeV11(nn.Module):
         
         # 2. Texture Features (ConvNeXt)
         # 支持梯度更新，专门学习伪造纹理
-        texture_feat = self.texture_branch(img_highres).float()
-        
-        # 3. LaRE Map + TruFor Map Processing
-        # Note: trufor_map could be None if user forgot to pass it
-        if trufor_map is not None:
-             # Resize TruFor from 512x512/HighRes to 32x32
-             # Note: It might be already resized in Dataset if we did it there, 
-             # but to be safe and handle different resolutions, we interpolate.
-             trufor_small = F.interpolate(trufor_map, size=(32, 32), mode='bilinear', align_corners=False)
-             # Concatenate: [B, 4, 32, 32] + [B, 1, 32, 32] -> [B, 5, 32, 32]
-             map_input = torch.cat([lare_map, trufor_small], dim=1)
+        need_seg_features = return_seg or return_seg_pyramid
+        if need_seg_features:
+            texture_feat, texture_pyramid = self.texture_branch(img_highres, return_features=True)
+            texture_feat = texture_feat.float()
         else:
-             # Fallback if no TruFor provided (e.g. old code inference)
-             # Pad with zeros? Or fail? 
-             # For robustness, we pad with a zero channel so indices match trained weights
-             batch_size, _, h, w = lare_map.shape
-             zeros = torch.zeros((batch_size, 1, h, w), device=lare_map.device, dtype=lare_map.dtype)
-             map_input = torch.cat([lare_map, zeros], dim=1)
-
-        lare_feat = self.lare_conv(map_input).flatten(1).float()
+            texture_feat = self.texture_branch(img_highres).float()
+            texture_pyramid = None
         
-        # 4. Feature Fusion
+        # 3. SSFR Map + Luma Map → 共享前处理
+        batch_size, n_ssfr, h, w = lare_map.shape
+        # Backward compat: pad to 7 SSFR channels if old features
+        if n_ssfr < 7:
+            pad = torch.zeros((batch_size, 7 - n_ssfr, h, w), device=lare_map.device, dtype=lare_map.dtype)
+            lare_map = torch.cat([lare_map, pad], dim=1)
+        if luma_map is not None:
+            luma_small = F.interpolate(luma_map, size=(h, w), mode='bilinear', align_corners=False)
+        else:
+            luma_small = torch.zeros((batch_size, 1, h, w), device=lare_map.device, dtype=lare_map.dtype)
+
+        # [V14] 共享前处理: 亮度门控 + 跨通道关联
+        map_input = torch.cat([lare_map, luma_small], dim=1)  # [B, 8, 32, 32]
+        map_gated = self.luma_gate(map_input)      # 逐像素亮度门控 → [B, 8, 32, 32]
+        map_mixed = self.ch_interact(map_gated)    # 跨通道关联     → [B, 8, 32, 32]
+
+        # 分类路: 池化到向量
+        lare_feat = self.lare_conv(map_mixed).flatten(1).float()
+        
+        # 4. Feature Fusion → Classification
         combined = torch.cat([semantic_feat, texture_feat, lare_feat], dim=1)
         logits = self.fusion_mlp(combined)
         
-        if return_seg:
-            # [V12] Auxiliary Segmentation Output using LaRE Map
-            seg_logits = self.seg_head(map_input).float() # [B, 1, 32, 32]
-            
-            return logits, seg_logits
+        if need_seg_features:
+            # [V14] 定位路独立前处理: seg loss 不回传到分类路的 luma_gate/ch_interact
+            map_gated_loc = self.luma_gate_loc(map_input)
+            map_mixed_loc = self.ch_interact_loc(map_gated_loc)
+
+            # [V14] 内嵌定位头: coarse → fine refinement
+            loc_x = self.loc_stem(map_mixed_loc)
+            loc_x = self.loc_cbam1(loc_x)
+            loc_x = self.loc_cbam2(loc_x)
+            loc_x = self.loc_cbam3(loc_x)
+            coarse_logits = self.loc_head(loc_x).float()  # [B, 1, 32, 32]
+
+            # [V14 fix] detach texture pyramid → seg loss 不回传到纹理分支，保护分类能力
+            mid_x = self.loc_refine64(loc_x, texture_pyramid['skip_64'].detach().float())
+            mid_base = F.interpolate(coarse_logits, size=mid_x.shape[-2:], mode='bilinear', align_corners=False)
+            mid_logits = (mid_base + self.mid_head(mid_x)).float()  # [B, 1, 64, 64]
+
+            fine_x = self.loc_refine128(mid_x, texture_pyramid['skip_128'].detach().float())
+            fine_base = F.interpolate(mid_logits, size=fine_x.shape[-2:], mode='bilinear', align_corners=False)
+            fine_logits = (fine_base + self.fine_head(fine_x)).float()  # [B, 1, 128, 128]
+
+            if return_seg_pyramid:
+                return logits, (coarse_logits, mid_logits, fine_logits)
+            return logits, fine_logits
             
         return logits
