@@ -3,11 +3,11 @@ import sys
 from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-from service.model_v11_fusion import LaREDeepFakeV11
+from service.model_v11_fusion import LaFT
 
 def create_fused_start_point(base_path, flh_path, out_path):
-    print("Instantiating empty LaREDeepFakeV11 model...")
-    model = LaREDeepFakeV11(num_classes=2, clip_type='RN50x64', texture_model='convnext_tiny')
+    print("Instantiating empty LaFT model...")
+    model = LaFT(num_classes=2, clip_type='RN50x64', texture_model='convnext_tiny')
     state = model.state_dict()
     
     print(f"Loading Base model: {base_path}")

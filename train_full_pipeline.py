@@ -7,7 +7,7 @@ LaRE 全流程训练脚本 (分类 + 定位 双管道, 解耦架构)
   0 - 环境检查
   1 - 生成标注 (分类 train/val/test_v2 + 定位 train/val_seg)
   2 - 构建提取列表 + SSFR 特征提取
-  3 - 训练分类模型 (LaREDeepFakeV11)
+    3 - 训练分类模型 (laft)
   4 - 训练定位模型 (SegFormer-B2)
   5 - 模型评估
 
@@ -102,7 +102,7 @@ def phase2(skip_extract=False):
 def phase3():
     """训练分类模型"""
     print("\n" + "=" * 60)
-    print("[Phase 3] 训练分类模型 (LaREDeepFakeV11)")
+    print("[Phase 3] 训练分类模型 (laft)")
     print("=" * 60)
     run("python script/5_train_model_v11.py",
         "分类训练 (参数读自 .env)")
@@ -119,7 +119,7 @@ def phase4():
         " --out_dir    outputs/segformer_rgb"
         " --batch_size 12"
         " --epochs     40"
-        " --patience   10",
+        " --patience   5",
         "SegFormer RGB 3ch 训练")
 
 
@@ -148,13 +148,13 @@ def phase5():
             f" --batch_size 12",
             "定位验证集评估", fatal=False)
 
-        eval_change = PROJECT_ROOT / 'annotation' / 'eval_change.txt'
-        if eval_change.exists():
+        eval_br = PROJECT_ROOT / 'annotation' / 'eval_brgen_stuff_val.txt'
+        if eval_br.exists():
             run(f"python test/evaluate_segformer.py"
                 f" --model {seg_model}"
-                f" --ann_file annotation/eval_change.txt"
+                f" --ann_file annotation/eval_brgen_stuff_val.txt"
                 f" --batch_size 12",
-                "定位独立评估集 (eval_change)", fatal=False)
+                "定位独立评估集 (BRGen_Stuff_Val)", fatal=False)
     else:
         print(f"  [跳过] 定位模型不存在: {seg_model}")
 

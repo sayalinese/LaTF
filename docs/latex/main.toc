@@ -1,0 +1,29 @@
+\contentsline {chapter}{摘要}{1}{chapter*.1}%
+\contentsline {chapter}{\numberline {第一章\hspace {.3em}}绪论}{3}{chapter.1}%
+\contentsline {section}{\numberline {1.1}研究背景与意义}{3}{section.1.1}%
+\contentsline {section}{\numberline {1.2}国内外研究现状}{3}{section.1.2}%
+\contentsline {section}{\numberline {1.3}本文的主要贡献}{4}{section.1.3}%
+\contentsline {section}{\numberline {1.4}论文组织结构}{4}{section.1.4}%
+\contentsline {chapter}{\numberline {第二章\hspace {.3em}}理论基础}{5}{chapter.2}%
+\contentsline {section}{\numberline {2.1}生成式图像篡改机理}{5}{section.2.1}%
+\contentsline {section}{\numberline {2.2}多模态特征融合理论}{5}{section.2.2}%
+\contentsline {section}{\numberline {2.3}语义分割与篡改定位算法基础}{5}{section.2.3}%
+\contentsline {chapter}{\numberline {第三章\hspace {.3em}}面向多源伪造的SSFR特征构建与数据流设计}{7}{chapter.3}%
+\contentsline {section}{\numberline {3.1}轻量级物理取证特征提取}{7}{section.3.1}%
+\contentsline {section}{\numberline {3.2}基于 SSIM 的细粒度定位掩码生成策略}{8}{section.3.2}%
+\contentsline {section}{\numberline {3.3}跨源生成式开源图像的采集与处理}{8}{section.3.3}%
+\contentsline {section}{\numberline {3.4}基于 Doubao 的生鲜垂类局部篡改数据集构建}{9}{section.3.4}%
+\contentsline {section}{\numberline {3.5}训练数据与评估测试集的正交隔离}{9}{section.3.5}%
+\contentsline {chapter}{\numberline {第四章\hspace {.3em}}LaFT篡改检测与SegFormer像素级定位算法架构}{11}{chapter.4}%
+\contentsline {section}{\numberline {4.1}总体双分支解耦架构设计}{11}{section.4.1}%
+\contentsline {section}{\numberline {4.2}基于LaFT融合的全局篡改检测分类模型}{11}{section.4.2}%
+\contentsline {section}{\numberline {4.3}定位分割分支架构与梯度平衡策略}{12}{section.4.3}%
+\contentsline {chapter}{\numberline {第五章\hspace {.3em}}实验结果与分析}{13}{chapter.5}%
+\contentsline {section}{\numberline {5.1}实验环境与数据集构建}{13}{section.5.1}%
+\contentsline {section}{\numberline {5.2}评价指标}{13}{section.5.2}%
+\contentsline {section}{\numberline {5.3}全局分类性能分析与对比实验}{14}{section.5.3}%
+\contentsline {section}{\numberline {5.4}像素级定位定性与定量分析}{14}{section.5.4}%
+\contentsline {section}{\numberline {5.5}核心消融实验}{14}{section.5.5}%
+\contentsline {chapter}{\numberline {第六章\hspace {.3em}}总结与展望}{16}{chapter.6}%
+\contentsline {section}{\numberline {6.1}工作总结}{16}{section.6.1}%
+\contentsline {section}{\numberline {6.2}未来展望}{16}{section.6.2}%

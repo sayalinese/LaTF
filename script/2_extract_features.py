@@ -18,7 +18,7 @@ from service.feature_extractors import MultiFeatureExtractor
 
 def main():
     parser = argparse.ArgumentParser(description='Extract LaRE features')
-    parser.add_argument('--input_path', type=str, required=True, help='Path to annotation file')
+    parser.add_argument('--input_paths', nargs='+', required=True, help='Path to annotation file(s), e.g. train_v2.txt val_v2.txt test_v2.txt')
     parser.add_argument('--output_path', type=str, default='dift.pt', help='Output directory')
     parser.add_argument('--dataset_type', type=str, default='auto', choices=['auto', 'genimage', 'sdxl'])
     parser.add_argument('--batch_size', type=int, default=int(os.getenv('EXTRACT_BATCH_SIZE', '32')))
@@ -29,49 +29,38 @@ def main():
     parser.add_argument('--bf16', action='store_true', help='Use BF16 for extraction (Recommended for RTX 30/40 series)')
     parser.add_argument('--save_aux_features', action='store_true', help='Also extract handcrafted aux features (freq/noise/edge)')
     parser.add_argument('--aux_size', type=int, default=28, help='Spatial size for aux features')
-    parser.add_argument('--extractor_type', type=str, default='ssfr', choices=['ssfr', 'lare'],
-                        help='Feature extractor: ssfr (MicroUNet+信号处理, 6ch) or lare (SDXL UNet, 4ch)')
-    parser.add_argument('--unet_path', type=str, default='outputs/ssfr_unet.pth',
-                        help='Path to trained SSFR UNet model (only for --extractor_type ssfr)')
-    parser.add_argument('--num_workers', type=int, default=int(os.getenv('EXTRACT_WORKERS', '8')),
-                        help='CPU 并行线程数 (SSFR Ch1-Ch5 并行计算，建议设为 CPU 核心数)')
-    parser.add_argument('--vae_model_id', type=str,
-                        default=os.getenv('VAE_MODEL_ID', ''),
-                        help='Flux VAE model ID for Ch6 reconstruction error (e.g. black-forest-labs/FLUX.1-schnell)')
+    parser.add_argument('--extractor_type', type=str, default='ssfr', choices=['ssfr', 'lare'], help='Feature extractor: ssfr or lare')
+    parser.add_argument('--unet_path', type=str, default='outputs/ssfr_unet.pth', help='Path to trained SSFR UNet model')
+    parser.add_argument('--num_workers', type=int, default=int(os.getenv('EXTRACT_WORKERS', '8')), help='CPU workers')
+    parser.add_argument('--vae_model_id', type=str, default=os.getenv('VAE_MODEL_ID', ''), help='Flux VAE model ID')
     args = parser.parse_args()
 
     # Setup
     output_root = Path(args.output_path).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    
-    # Load Annotations
-    if not Path(args.input_path).exists():
-        print(f"Error: Input file {args.input_path} not found")
-        return
 
-    # Try utf-8 first, fallback to gb18030 (superset of gbk/gb2312) which handles Chinese Windows paths better
-    # Or just ignore errors to be robust
-    try:
-        with open(args.input_path, encoding='utf-8') as f:
-            input_infos = f.readlines()
-    except UnicodeDecodeError:
-        print("UTF-8 decode failed, trying gb18030...")
+    unique_paths = set()
+    for input_file in args.input_paths:
+        file_path = Path(input_file)
+        if not file_path.exists(): continue
         try:
-            with open(args.input_path, encoding='gb18030') as f:
-                input_infos = f.readlines()
-        except UnicodeDecodeError:
-             print("GB18030 failed, trying with errors='ignore'...")
-             with open(args.input_path, encoding='utf-8', errors='ignore') as f:
-                input_infos = f.readlines()
-    
-    if not input_infos:
-        print("Empty input file")
-        return
+            with open(file_path, encoding='utf-8') as f: lines_file = f.readlines()
+        except:
+            with open(file_path, encoding='utf-8', errors='ignore') as f: lines_file = f.readlines()
+        
+        for line in lines_file:
+            line = line.strip()
+            if not line: continue
+            sep = "	" if "	" in line else " "
+            unique_paths.add(line.rsplit(sep, 1)[0])
+
+    if not unique_paths: return
+    input_infos = [f"{p}\t1\n" for p in unique_paths]
 
     # Determine Processor
     if args.dataset_type == 'auto':
         first_line = input_infos[0]
-        if '\t' in first_line or 'sdxl' in args.input_path.lower():
+        if '\t' in first_line or 'sdxl' in args.input_paths[0].lower():
             args.dataset_type = 'sdxl'
         else:
             args.dataset_type = 'genimage'

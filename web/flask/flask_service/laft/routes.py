@@ -4,8 +4,6 @@ import traceback
 import base64
 from io import BytesIO
 
-import cv2
-import numpy as np
 from flask import Blueprint, request, jsonify, current_app
 from PIL import Image, ImageOps
 import uuid as _uuid
@@ -24,6 +22,8 @@ def health_check():
         "model_loaded": mgr.model is not None,
         "model_version": mgr.model_version,
         "cascade_enabled": mgr.cascade_inference is not None,
+        "localization_enabled": mgr.localization_model is not None,
+        "localization_ckpt": mgr.localization_ckpt_path,
         "resolved_out_dir": mgr.resolved_out_dir,
         "ckpt_path": mgr.loaded_ckpt_path,
     })
@@ -40,6 +40,10 @@ def get_config():
         "lare_model_type": os.getenv("LARE_MODEL_TYPE", "sdxl"),
         "device": mgr.device,
         "dual_detector_enabled": mgr.dual_detector is not None,
+        "localization_enabled": mgr.localization_model is not None,
+        "localization_model_name": mgr.localization_model_name,
+        "localization_ckpt": mgr.localization_ckpt_path,
+        "localization_threshold": mgr.localization_threshold,
         "resolved_out_dir": mgr.resolved_out_dir,
         "ckpt_path": mgr.loaded_ckpt_path,
     })
@@ -72,39 +76,26 @@ def predict_dual():
         return jsonify({"error": "No file selected"}), 400
     try:
         mgr = current_app.laft_manager
-        if mgr.dual_detector is None:
-            return jsonify({"error": "Dual detector not initialized"}), 500
-
         img = load_uploaded_image(file)
-        result = mgr.dual_detector.predict(img)
+        result = mgr.predict(img)
 
-        heatmap_base64 = None
-        if result['loc_map'] is not None:
-            loc_np = result['loc_map']
-            loc_np = cv2.GaussianBlur(loc_np.astype(np.float32), (5, 5), 0)
-            if loc_np.max() > loc_np.min():
-                loc_norm = ((loc_np - loc_np.min()) / (loc_np.max() - loc_np.min()) * 255).astype(np.uint8)
-            else:
-                loc_norm = np.zeros_like(loc_np, dtype=np.uint8)
-            loc_norm = cv2.resize(loc_norm, (448, 448), interpolation=cv2.INTER_LINEAR)
-            heatmap_color = cv2.applyColorMap(loc_norm, cv2.COLORMAP_JET)
-            heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-
-            heatmap_pil = Image.fromarray(heatmap_color)
-            buffered = BytesIO()
-            heatmap_pil.save(buffered, format="JPEG")
-            heatmap_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        ai_prob = result.get('probabilities', {}).get('AI Generated', result.get('confidence', 0.0))
+        cascade_info = result.get('cascade_info') or {}
 
         response = {
-            "prediction": result['prediction'],
-            "confidence": result['confidence'],
-            "detection_type": result['detection_type'],
-            "prob_global": result['prob_global'],
-            "prob_local": result['prob_local'],
-            "explanation": result['explanation'],
-            "heatmap": heatmap_base64,
+            "prediction": result.get('class_name', 'Unknown'),
+            "confidence": float(result.get('confidence', 0.0)),
+            "detection_type": "upgraded_classifier_localizer",
+            "prob_global": float(cascade_info.get('global_prob', ai_prob)),
+            "prob_local": result.get('localization_score'),
+            "explanation": "分类由 laft 输出，定位由独立 SegFormer 输出。",
+            "heatmap": result.get('lare_heatmap') or result.get('heatmap'),
+            "localization_heatmap": result.get('localization_heatmap'),
         }
-        print(f"[Dual] {result['prediction']} (global={result['prob_global']:.2f}, local={result['prob_local']})")
+        print(
+            f"[DualCompat] {response['prediction']} "
+            f"(global={response['prob_global']:.2f}, local={response['prob_local']})"
+        )
         return jsonify(response)
     except Exception as e:
         print(f"Dual prediction error: {e}")
@@ -186,8 +177,15 @@ def detect_message():
         detect_data = {
             "class_name": laft_result.get("class_name", "Unknown"),
             "confidence": round(laft_result.get("confidence", 0), 4),
+            "class_idx": int(laft_result.get("class_idx", 0)),
             "probabilities": laft_result.get("probabilities", {}),
             "heatmap": laft_result.get("heatmap"),
+            "lare_heatmap": laft_result.get("lare_heatmap"),
+            "localization_heatmap": laft_result.get("localization_heatmap"),
+            "localization_score": laft_result.get("localization_score"),
+            "localization_area_ratio": laft_result.get("localization_area_ratio"),
+            "cascade_info": laft_result.get("cascade_info"),
+            "debug": laft_result.get("debug"),
         }
 
         vl_report = None
@@ -197,7 +195,7 @@ def detect_message():
                 buffered = BytesIO()
                 img.save(buffered, format="JPEG")
                 b64_img = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                is_fake = detect_data["class_name"] != "Real"
+                is_fake = int(detect_data.get("class_idx", 0)) == 1
                 vl_result = explain_logic_with_qwen(b64_img, is_fake)
                 vl_report = vl_result.get("report", "")
             except Exception as vl_err:

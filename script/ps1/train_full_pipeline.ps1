@@ -18,7 +18,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "环境检查失败!" -ForegroundColor Red
 # ─── Phase 1: 生成标注文件 ───────────────────────────────────
 Write-Host "`n[Phase 1] 生成标注文件..." -ForegroundColor Yellow
 
-Write-Host "  1a. 分类标注 (train_v2 / val_v2 / test_v2)..."
+Write-Host "  1a. 分类标注 (train_v2 / val_v2 / test_v2 / eval_brgen_stuff_val)..."
 python script/gen_annotations_v2.py
 if ($LASTEXITCODE -ne 0) { Write-Host "分类标注生成失败!" -ForegroundColor Red; exit 1 }
 
@@ -64,7 +64,7 @@ python script/2_extract_features.py `
 if ($LASTEXITCODE -ne 0) { Write-Host "SSFR 特征提取失败!" -ForegroundColor Red; exit 1 }
 
 # ─── Phase 3: 训练分类模型 ──────────────────────────────────
-Write-Host "`n[Phase 3] 训练分类模型 (LaREDeepFakeV11)..." -ForegroundColor Yellow
+Write-Host "`n[Phase 3] 训练分类模型 (laft)..." -ForegroundColor Yellow
 python script/5_train_model_v11.py
 if ($LASTEXITCODE -ne 0) { Write-Host "分类训练失败!" -ForegroundColor Red; exit 1 }
 
@@ -78,7 +78,7 @@ python script/train_segformer.py `
     --out_dir    outputs/segformer_rgb `
     --batch_size 12 `
     --epochs     40 `
-    --patience   10
+    --patience   5
 if ($LASTEXITCODE -ne 0) { Write-Host "SegFormer RGB 训练失败!" -ForegroundColor Red; exit 1 }
 
 # ─── Phase 5: 评估 ──────────────────────────────────────────
@@ -100,7 +100,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "定位评估失败 (非致命)" -Foregrou
 Write-Host "  5c. 定位独立评估集..."
 python test/evaluate_segformer.py `
     --model    outputs/segformer_rgb/best.pth `
-    --ann_file annotation/eval_change.txt `
+    --ann_file annotation/eval_brgen_stuff_val.txt `
     --batch_size 12
 if ($LASTEXITCODE -ne 0) { Write-Host "定位独立评估失败 (非致命)" -ForegroundColor DarkYellow }
 

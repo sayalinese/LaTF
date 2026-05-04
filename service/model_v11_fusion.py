@@ -161,7 +161,7 @@ class TextureBranch(nn.Module):
         }
         return global_feat, pyramid
 
-class LaREDeepFakeV11(nn.Module):
+class LaFT(nn.Module):
     """
     LaRE V11: Dual-Stream Fusion Network
     Stream 1: CLIP (Semantic / Content)
@@ -320,3 +320,4 @@ class LaREDeepFakeV11(nn.Module):
             return logits, fine_logits
             
         return logits
+

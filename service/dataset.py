@@ -74,9 +74,9 @@ class ImageDataset(Dataset):
         self.test_list = []  # 初始化 test_list
         self.anchor_list = []
         self.isAnchor = False
-        self.isVal = False # Internal flag for switching transforms
         self.split_anchor = split_anchor
         self.is_train = is_train  # 保存 is_train 参数
+        self.isVal = not is_train  # is_train=False 时默认走验证列表
         self.drop_no_map = drop_no_map
         
         # [V15] TruFor removed, luma generated on-the-fly
@@ -146,6 +146,10 @@ class ImageDataset(Dataset):
         
         # [V12+] Support multiple localization supervision roots.
         self.mask_roots = _dedupe_paths([
+            self.data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'COCO',
+            self.data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'ImageNet',
+            self.data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'Places',
+            self.data_root / '新数据' / 'BRGen_Stuff_Val' / 'Gt',
             self.data_root / 'doubao' / 'masks',
             self.data_root / 'change' / 'masks',
         ])
@@ -307,6 +311,21 @@ class ImageDataset(Dataset):
         image_path_norm = str(image_path).lower().replace('\\', '/')
 
         candidate_roots = []
+        if '/brgen_stuff_val/tp/' in image_path_norm:
+            candidate_roots.append(self.data_root / '新数据' / 'BRGen_Stuff_Val' / 'Gt')
+        if '/br-gen/forged/' in image_path_norm and '/stuff/' in image_path_norm:
+            if '/coco/' in image_path_norm:
+                candidate_roots.append(self.data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'COCO')
+            elif '/imagenet/' in image_path_norm:
+                candidate_roots.append(self.data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'ImageNet')
+            elif '/places/' in image_path_norm:
+                candidate_roots.append(self.data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'Places')
+            else:
+                candidate_roots.extend([
+                    self.data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'COCO',
+                    self.data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'ImageNet',
+                    self.data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'Places',
+                ])
         if '/change/images/' in image_path_norm or '/change/fack/' in image_path_norm:
             candidate_roots.append(self.data_root / 'change' / 'masks')
         if '/doubao/' in image_path_norm:
@@ -315,10 +334,19 @@ class ImageDataset(Dataset):
         candidate_roots.extend(self.mask_roots)
         candidate_roots = _dedupe_paths(candidate_roots)
 
+        stem_candidates = [stem]
+        if stem.endswith('_mask'):
+            base_stem = stem[:-5]
+            if base_stem:
+                stem_candidates.append(base_stem)
+        else:
+            stem_candidates.append(f'{stem}_mask')
+
         candidate_paths = []
         for root in candidate_roots:
-            for ext in MASK_EXTENSIONS:
-                candidate_paths.append(root / f"{stem}{ext}")
+            for stem_name in stem_candidates:
+                for ext in MASK_EXTENSIONS:
+                    candidate_paths.append(root / f"{stem_name}{ext}")
         candidate_paths = _dedupe_paths(candidate_paths)
 
         for mask_path_png in candidate_paths:

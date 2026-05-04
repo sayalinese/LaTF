@@ -36,7 +36,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 load_dotenv(PROJECT_ROOT / ".env")
 
 from service.dataset import ImageDataset
-from service.model_v11_fusion import LaREDeepFakeV11
+from service.model_v11_fusion import LaFT
 
 plt.rcParams["font.sans-serif"] = ["SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
@@ -164,7 +164,7 @@ def plot_training_curves():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_model(ckpt_path: Path, device):
-    model = LaREDeepFakeV11(
+    model = LaFT(
         num_classes=2,
         clip_type=CLIP_TYPE,
         texture_model=TEXTURE_MODEL,
@@ -488,3 +488,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -10,6 +10,10 @@ export interface PredictResponse {
   class_idx: number;
   probabilities: Record<string, number>;
   heatmap?: string | null;
+  lare_heatmap?: string | null;
+  localization_heatmap?: string | null;
+  localization_score?: number | null;
+  localization_area_ratio?: number | null;
   cascade_info?: CascadeInfo;
   debug?: {
     model_version: string;
@@ -18,6 +22,9 @@ export interface PredictResponse {
     cascade_enabled: boolean;
     heatmap_source?: string;
     localization_heatmap?: string | null;
+    localization_enabled?: boolean;
+    localization_source?: string | null;
+    localization_ckpt?: string | null;
   };
 }
 
@@ -29,6 +36,10 @@ export interface ConfigResponse {
   lare_model_type: string;
   device: string;
   dual_detector_enabled: boolean;
+  localization_enabled?: boolean;
+  localization_model_name?: string;
+  localization_ckpt?: string | null;
+  localization_threshold?: number;
   resolved_out_dir: string;
   ckpt_path?: string | null;
 }

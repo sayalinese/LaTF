@@ -1,19 +1,23 @@
 import os
-import torch
-import torch.nn.functional as F
-import numpy as np
-import cv2
+import contextlib
 import base64
 from io import BytesIO
-from PIL import Image
 from pathlib import Path
 
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from PIL import Image
+from torchvision import transforms
+
 from service.model import CLipClassifierWMapV9Lite, CLipClassifierWMapV7, CLipClassifierV10Fusion
-from service.model_v11_fusion import LaREDeepFakeV11
+from service.model_v11_fusion import LaFT
 from service.lare_extractor_module import LareExtractor
 from service.ssfr_extractor_module import SsfrExtractor
 from service.cascade_inference import CascadeInference
-from service.statistical_detector import StatisticalLocalDetector, DualModelDetector
+from service.statistical_detector import StatisticalLocalDetector
 from service.heatmap_utils import refine_map_for_visibility
 
 class LaFTManager:
@@ -24,23 +28,44 @@ class LaFTManager:
     def __init__(self, project_root):
         self.project_root = Path(project_root)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.class_names = ["Real Photo", "AI Generated"]
-        
+        self.class_names = ["Real", "AI Generated"]
+
         self.model = None
         self.lare_extractor = None
         self.cascade_inference = None
-        self.dual_detector = None
+        self.dual_detector = None  # 保留字段以兼容旧前端 config 展示
         self.stat_detector = None
-        
+
+        # 独立定位模型 (SegFormer)
+        self.localization_model = None
+        self.localization_ckpt_path = None
+        self.localization_enabled = os.getenv("LOCALIZATION_ENABLED", "true").lower() == "true"
+        self.localization_model_name = os.getenv("LOCALIZATION_MODEL_NAME", "nvidia/segformer-b2-finetuned-ade-512-512")
+        self.localization_weights = os.getenv("LOCALIZATION_CKPT", "outputs/segformer_rgb/best.pth")
+        self.localization_img_size = int(os.getenv("LOCALIZATION_IMG_SIZE", "512"))
+        self.localization_threshold = float(os.getenv("LOCALIZATION_THRESHOLD", "0.5"))
+        self.localization_use_ssfr = os.getenv("LOCALIZATION_USE_SSFR", "false").lower() == "true"
+
         self.loaded_ckpt_path = None
         self.resolved_out_dir = None
-        
+
         self.use_cascade = os.getenv("USE_CASCADE_INFERENCE", "true").lower() == "true"
         self.cascade_threshold = float(os.getenv("CASCADE_THRESHOLD", "0.25"))
         self.cascade_high_threshold = float(os.getenv("CASCADE_HIGH_THRESHOLD", "0.90"))
         self.model_version = os.getenv("MODEL_VERSION", "V13")
         self.ai_confidence_threshold = float(os.getenv("AI_CONFIDENCE_THRESHOLD", "0.5"))
-        
+
+        self.preprocess_clip = transforms.Compose([
+            transforms.Resize((448, 448)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711)),
+        ])
+        self.preprocess_highres = transforms.Compose([
+            transforms.Resize((512, 512)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ])
+
     def load_models(self):
         print(f"Loading models on {self.device}...")
 
@@ -50,7 +75,7 @@ class LaFTManager:
         
         if self.lare_extractor is None:
             try:
-                if self.model_version in ("V14", "V17", "V13"):
+                if self.model_version in ("V14", "V17", "V13", "V11", "V11Fusion"):
                     # V14/V17/V13: 使用 SSFR 7ch 特征提取器 (无需 SDXL UNet)
                     unet_path = os.getenv('SSFR_UNET_PATH', 'outputs/ssfr_unet.pth')
                     vae_model_id = os.getenv('VAE_MODEL_ID', '')
@@ -66,7 +91,7 @@ class LaFTManager:
                 print(f"[LaRE/SSFR] Failed to load: {ex}")
                 self.lare_extractor = None
 
-        # 2. (TruFor 已移除，改用 FLH + luma，无需外部模型初始化)
+        # 2. (TruFor 已移除)
 
         # 3. Initialize Classifier
         clip_type = "RN50x64"
@@ -76,18 +101,18 @@ class LaFTManager:
         
         if self.model_version in ("V14", "V17"):
             texture_model = os.getenv("TEXTURE_MODEL", "convnext_tiny")
-            model = LaREDeepFakeV11(clip_type=clip_type, num_classes=2, texture_model=texture_model)
+            model = LaFT(clip_type=clip_type, num_classes=2, texture_model=texture_model)
             default_out_dir = 'outputs/v14_multiscale' if self.model_version == 'V14' else 'outputs/v17_joint'
             out_dir = os.getenv('OUT_DIR', default_out_dir)
             print(f"[Config] Initializing {self.model_version} Joint (Integrated FLH) with Texture Branch: {texture_model}")
         elif self.model_version == "V13" or self.model_version == "V11Fusion":
             texture_model = os.getenv("TEXTURE_MODEL", "convnext_tiny")
-            model = LaREDeepFakeV11(clip_type=clip_type, num_classes=2, texture_model=texture_model)
+            model = LaFT(clip_type=clip_type, num_classes=2, texture_model=texture_model)
             out_dir = os.getenv('OUT_DIR', 'outputs/v13_doubao_focused')
             print(f"[Config] Initializing V13 Fusion (FLH Enhanced) with Texture Branch: {texture_model}")
         elif self.model_version == "V11":
             texture_model = os.getenv("TEXTURE_MODEL", "convnext_tiny")
-            model = LaREDeepFakeV11(clip_type=clip_type, num_classes=2, texture_model=texture_model)
+            model = LaFT(clip_type=clip_type, num_classes=2, texture_model=texture_model)
             out_dir = os.getenv('OUT_DIR', 'outputs/v11_fusion')
             print(f"[Config] Initializing V11 Fusion with Texture Branch: {texture_model}")
         elif self.model_version == "V10Fusion":
@@ -141,7 +166,7 @@ class LaFTManager:
         model.eval()
         self.model = model
         
-        # 4. Cascade Inference
+        # 4. Cascade Inference (仅影响分类概率，不替代独立定位模型)
         if self.use_cascade and self.model_version in ("V9Lite", "V10Fusion", "V11", "V13", "V14", "V17"):
             self.cascade_inference = CascadeInference(
                 model=self.model,
@@ -159,19 +184,106 @@ class LaFTManager:
         self.stat_detector = StatisticalLocalDetector()
         print("[Config] Statistical local detector initialized")
         
-        # 6. Dual Model Detector
-        if self.lare_extractor is not None:
-            self.dual_detector = DualModelDetector(
-                global_model=self.model,
-                lare_extractor=self.lare_extractor,
-                device=self.device,
-                global_high_threshold=0.90,
-                global_low_threshold=0.20,
-                local_weight=0.6
-            )
-            print("[Config] Dual model detector initialized")
-        
+        # 6. 独立定位模型 (SegFormer)
+        self._load_localization_model()
+
+        # 7. 旧接口字段保留
+        self.dual_detector = None
+
         print("Models loaded successfully!")
+
+    def _resolve_path(self, maybe_relative_path: str) -> Path:
+        p = Path(maybe_relative_path)
+        if p.is_absolute():
+            return p
+        return (self.project_root / p).resolve()
+
+    def _expand_first_conv(self, model, num_channels: int):
+        """将 SegFormer 第一层 Conv 输入从 3 扩展到 num_channels。"""
+        first_conv = model.segformer.encoder.patch_embeddings[0].proj
+        old_weight = first_conv.weight.data  # [out, 3, kH, kW]
+        out_ch, _, k_h, k_w = old_weight.shape
+
+        new_conv = nn.Conv2d(
+            num_channels,
+            out_ch,
+            kernel_size=(k_h, k_w),
+            stride=first_conv.stride,
+            padding=first_conv.padding,
+            bias=first_conv.bias is not None,
+        )
+        with torch.no_grad():
+            new_conv.weight[:, :3] = old_weight
+            nn.init.xavier_uniform_(new_conv.weight[:, 3:])
+            if first_conv.bias is not None:
+                new_conv.bias.copy_(first_conv.bias.data)
+
+        model.segformer.encoder.patch_embeddings[0].proj = new_conv
+
+    def _load_localization_model(self):
+        self.localization_model = None
+        self.localization_ckpt_path = None
+
+        if not self.localization_enabled:
+            print("[Config] Independent localization disabled")
+            return
+
+        try:
+            from transformers import SegformerForSemanticSegmentation, logging as transformers_logging
+        except Exception as ex:
+            print(f"[Config] transformers not available, localization disabled: {ex}")
+            return
+
+        ckpt_path = self._resolve_path(self.localization_weights)
+        if not ckpt_path.exists():
+            print(f"[Config] Localization checkpoint not found: {ckpt_path}")
+            return
+
+        transformers_logging.set_verbosity_error()
+        num_channels = 10 if self.localization_use_ssfr else 3
+
+        try:
+            model = SegformerForSemanticSegmentation.from_pretrained(
+                self.localization_model_name,
+                num_labels=2,
+                ignore_mismatched_sizes=True,
+            )
+            if num_channels != 3:
+                self._expand_first_conv(model, num_channels)
+
+            checkpoint = torch.load(str(ckpt_path), map_location=self.device, weights_only=False)
+            state_dict = checkpoint.get('state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+            state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+            msg = model.load_state_dict(state_dict, strict=False)
+            print(f"[Config] Localization load result: {msg}")
+
+            model.to(self.device)
+            model.eval()
+            self.localization_model = model
+            self.localization_ckpt_path = str(ckpt_path)
+            mode = "RGB+SSFR(10ch)" if self.localization_use_ssfr else "RGB(3ch)"
+            print(f"[Config] Independent localization enabled: {self.localization_model_name}, {mode}, ckpt={ckpt_path}")
+        except Exception as ex:
+            print(f"[Config] Failed to load independent localization model: {ex}")
+            self.localization_model = None
+            self.localization_ckpt_path = None
+
+    def _get_autocast_context(self):
+        if self.device != "cuda" or not torch.cuda.is_available():
+            return contextlib.nullcontext()
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        try:
+            from torch.amp import autocast
+            return autocast(device_type='cuda', dtype=amp_dtype)
+        except Exception:
+            from torch.cuda.amp import autocast
+            return autocast(dtype=amp_dtype)
+
+    @staticmethod
+    def _get_luma_map(img: Image.Image, size: int = 32):
+        gray = np.array(img.convert('L'), dtype=np.float32) / 255.0
+        luma_small = cv2.resize(gray, (size, size), interpolation=cv2.INTER_LINEAR)
+        return torch.from_numpy(luma_small).unsqueeze(0).unsqueeze(0).float()
 
     def _generate_heatmap_base64(self, loc_map_np, img: Image.Image):
         """生成并在原图上叠加热力图，返回base64"""
@@ -203,6 +315,58 @@ class LaFTManager:
         heatmap_pil.save(buffered, format="JPEG", quality=90)
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
+    def _predict_localization(self, img: Image.Image):
+        """独立 SegFormer 定位推理。"""
+        if self.localization_model is None:
+            return {
+                "localization_heatmap": None,
+                "localization_score": None,
+                "localization_area_ratio": None,
+                "localization_source": None,
+            }
+
+        rgb = np.array(img.convert('RGB'))
+        h, w = rgb.shape[:2]
+        resized = cv2.resize(rgb, (self.localization_img_size, self.localization_img_size), interpolation=cv2.INTER_LINEAR)
+
+        x = torch.from_numpy(resized.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0)
+        mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
+        x = (x - mean) / std
+
+        if self.localization_use_ssfr:
+            if self.lare_extractor is None:
+                return {
+                    "localization_heatmap": None,
+                    "localization_score": None,
+                    "localization_area_ratio": None,
+                    "localization_source": "segformer_ssfr_missing_extractor",
+                }
+            ssfr = self.lare_extractor.extract_single(img).float().cpu()  # [1,7,32,32]
+            ssfr = F.interpolate(ssfr, size=(self.localization_img_size, self.localization_img_size), mode='bilinear', align_corners=False)
+            x = torch.cat([x, ssfr], dim=1)
+
+        x = x.to(self.device)
+
+        with torch.no_grad():
+            with self._get_autocast_context():
+                outputs = self.localization_model(pixel_values=x)
+                logits = outputs.logits.float()
+
+            logits = F.interpolate(logits, size=(h, w), mode='bilinear', align_corners=False)
+            prob_map = torch.softmax(logits, dim=1)[:, 1].squeeze(0).cpu().numpy().astype(np.float32)
+
+        heatmap = self._generate_heatmap_base64(prob_map, img)
+        area_ratio = float((prob_map >= self.localization_threshold).mean())
+        score = float(prob_map.max())
+
+        return {
+            "localization_heatmap": heatmap,
+            "localization_score": score,
+            "localization_area_ratio": area_ratio,
+            "localization_source": "segformer_b2",
+        }
+
     def predict(self, img: Image.Image):
         if self.model is None or self.lare_extractor is None:
             try:
@@ -225,9 +389,29 @@ class LaFTManager:
 
         try:
             if self.cascade_inference is not None:
-                return self._predict_cascade(img)
+                base = self._predict_cascade(img)
             else:
-                return self._predict_standard(img)
+                base = self._predict_standard(img)
+
+            # 兼容字段：heatmap 默认展示独立定位热图；保留老定位热图在 lare_heatmap
+            lare_heatmap = base.pop("heatmap", None)
+            localization = self._predict_localization(img)
+
+            base["lare_heatmap"] = lare_heatmap
+            base["localization_heatmap"] = localization["localization_heatmap"]
+            base["localization_score"] = localization["localization_score"]
+            base["localization_area_ratio"] = localization["localization_area_ratio"]
+            base["heatmap"] = localization["localization_heatmap"] or lare_heatmap
+
+            debug = base.get("debug", {})
+            debug.update({
+                "localization_enabled": self.localization_model is not None,
+                "localization_source": localization["localization_source"],
+                "localization_ckpt": self.localization_ckpt_path,
+            })
+            base["debug"] = debug
+
+            return base
         finally:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -248,13 +432,16 @@ class LaFTManager:
         if map_source is not None and (result['pred'] == 1 or result['prob'] > 0.3):
             heatmap_base64 = self._generate_heatmap_base64(map_source, img)
         
+        ai_prob = float(result['prob'])
+        class_idx = 1 if ai_prob >= self.ai_confidence_threshold else 0
+
         return {
-            "class_name": result['class_name'],
-            "confidence": result['prob'],
-            "class_idx": result['pred'],
+            "class_name": self.class_names[class_idx],
+            "confidence": ai_prob,
+            "class_idx": class_idx,
             "probabilities": {
-                self.class_names[0]: 1 - result['prob'],
-                self.class_names[1]: result['prob']
+                self.class_names[0]: 1.0 - ai_prob,
+                self.class_names[1]: ai_prob,
             },
             "heatmap": heatmap_base64,
             "cascade_info": {"global_prob": result['global_prob'], "local_prob": result['local_prob'], "crop_bbox": result['crop_bbox']},
@@ -268,75 +455,59 @@ class LaFTManager:
         }
 
     def _predict_standard(self, img: Image.Image):
-        from torchvision import transforms
-
-        preprocess_clip = transforms.Compose([
-            transforms.Resize((448, 448)), transforms.ToTensor(),
-            transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
-        ])
-        preprocess_highres = transforms.Compose([
-            transforms.Resize((512, 512)), transforms.ToTensor(),
-            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-        ])
-        
         with torch.no_grad():
             loss_map = self.lare_extractor.extract_single(img).to(self.device)
-            if torch.cuda.is_available(): torch.cuda.empty_cache()
-            clip_input = preprocess_clip(img).unsqueeze(0).to(self.device)
-            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-            
-            try: from torch.amp import autocast
-            except ImportError: from torch.cuda.amp import autocast
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-            with autocast('cuda', dtype=amp_dtype):
+            clip_input = self.preprocess_clip(img).unsqueeze(0).to(self.device)
+
+            with self._get_autocast_context():
                 if self.model_version in ("V14", "V17"):
-                    # [V14] 三流融合 + coarse-to-fine 高分辨率定位头
-                    highres_input = preprocess_highres(img).unsqueeze(0).to(self.device)
-                    gray = np.array(img.convert('L'), dtype=np.float32) / 255.0
-                    luma_small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_LINEAR)
-                    luma_map = torch.from_numpy(luma_small).unsqueeze(0).unsqueeze(0).float().to(self.device)
-                    
+                    highres_input = self.preprocess_highres(img).unsqueeze(0).to(self.device)
+                    luma_map = self._get_luma_map(img).to(self.device)
+
                     logits, seg_logits = self.model(
                         clip_input, highres_input, loss_map,
                         luma_map=luma_map, return_seg=True
                     )
-                    # V14 fine head 输出: sigmoid → 更高分辨率篡改概率热图
                     loc_map = torch.sigmoid(seg_logits.float())
-                elif self.model_version in ["V11", "V13"]:
-                    highres_input = preprocess_highres(img).unsqueeze(0).to(self.device)
-                    # Generate luma map on-the-fly (replaces TruFor)
-                    gray = np.array(img.convert('L'), dtype=np.float32) / 255.0
-                    luma_small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_LINEAR)
-                    luma_map = torch.from_numpy(luma_small).unsqueeze(0).unsqueeze(0).float().to(self.device)
-                    
-                    try: logits = self.model(clip_input, highres_input, loss_map, luma_map=luma_map)
-                    except TypeError: logits = self.model(clip_input, highres_input, loss_map)
+                elif self.model_version in ["V11", "V13", "V11Fusion"]:
+                    highres_input = self.preprocess_highres(img).unsqueeze(0).to(self.device)
+                    luma_map = self._get_luma_map(img).to(self.device)
+
+                    try:
+                        logits = self.model(clip_input, highres_input, loss_map, luma_map=luma_map)
+                    except TypeError:
+                        logits = self.model(clip_input, highres_input, loss_map)
                     loc_map = loss_map
-                    if loc_map.shape[1] == 4: loc_map = loc_map.mean(dim=1, keepdim=True)
+                    if loc_map.shape[1] >= 4:
+                        loc_map = loc_map.mean(dim=1, keepdim=True)
                 elif hasattr(self.model, 'loc_head'):
                     logits, loc_map = self.model(clip_input, loss_map, return_loc=True)
                 else:
                     logits = self.model(clip_input, loss_map)
                     loc_map = None
-                
+
+        if isinstance(logits, tuple):
+            logits = logits[0]
+
         probs = F.softmax(logits.float(), dim=1)[0]
-        confidence, pred_idx = torch.max(probs, 0)
-        
-        if probs[1].item() < self.ai_confidence_threshold:
-            pred_idx = torch.tensor(0)
-            confidence = torch.tensor(1.0 - probs[1].item())
-            
-        idx = int(pred_idx.item())
+        ai_prob = float(probs[1].item())
+        idx = 1 if ai_prob >= self.ai_confidence_threshold else 0
+
         heatmap_base64 = None
         use_heatmap = self.model_version in ("V14", "V17", "V13", "V11")
 
         if use_heatmap and loc_map is not None:
             loc_np = loc_map.squeeze().cpu().float().numpy()
             heatmap_base64 = self._generate_heatmap_base64(loc_np, img)
-            
+
         return {
-            "class_name": self.class_names[idx], "confidence": float(confidence.item()), "class_idx": idx,
-            "probabilities": {self.class_names[0]: float(probs[0]), self.class_names[1]: float(probs[1])},
+            "class_name": self.class_names[idx],
+            "confidence": ai_prob,
+            "class_idx": idx,
+            "probabilities": {self.class_names[0]: 1.0 - ai_prob, self.class_names[1]: ai_prob},
             "heatmap": heatmap_base64,
             "debug": {"model_version": self.model_version, "cascade_enabled": False}
         }

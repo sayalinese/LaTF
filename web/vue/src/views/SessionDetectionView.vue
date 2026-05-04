@@ -74,7 +74,13 @@ const stepReport = ref<'waiting' | 'active' | 'done'>('waiting');
 const showForensicsReport = ref(false);
 const activeReportData = ref<ForensicsReportData | null>(null);
   const isGeneratingReport = ref(false);
-const isFake = computed(() => detectResult.value && detectResult.value.class_name !== 'Real');
+const isFake = computed(() => {
+  if (!detectResult.value) return false;
+  if (typeof detectResult.value.class_idx === 'number') {
+    return detectResult.value.class_idx === 1;
+  }
+  return detectResult.value.class_name !== 'Real';
+});
 
   const detectingMsg = computed(() => {
     if (!detectingMsgId.value || !messages.value) return null;
@@ -522,7 +528,9 @@ const startVlStream = async () => {
 
     const reportId = Math.random().toString();
 
-    const isFakeValue = detectResult.value.class_name !== 'Real';
+    const isFakeValue = typeof detectResult.value.class_idx === 'number'
+      ? detectResult.value.class_idx === 1
+      : detectResult.value.class_name !== 'Real';
 
     isGeneratingReport.value = true;
 

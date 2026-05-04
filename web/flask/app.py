@@ -350,6 +350,7 @@ def get_session_messages(session_id):
         sender = User.query.get(m.sender_id)
         sender_name = sender.nickname if sender else m.sender_id
         sender_avatar = (sender.avatar or sender_name[0].upper()) if sender else m.sender_id[0].upper()
+        detect_payload = m.ai_detect_data if m.ai_detect_data else None
         res.append({
             "id": str(m.id),
             "role": m.sender_role,
@@ -359,6 +360,8 @@ def get_session_messages(session_id):
             "content": m.content,
             "type": m.content_type,
             "hasBeenDetected": True if m.ai_detect_data else False,
+            "detectData": detect_payload,
+            "ai_detect_data": detect_payload,
             "created_at": m.created_at.isoformat() if m.created_at else None
         })
     return jsonify({"success": True, "messages": res})

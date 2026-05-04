@@ -15,7 +15,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
-from service.model_v11_fusion import LaREDeepFakeV11
+from service.model_v11_fusion import LaFT
 from service.lare_extractor_module import LareExtractor
 from service.cascade_inference import CascadeInference
 
@@ -62,7 +62,7 @@ def test_consistency():
     lare_extractor = None
     if not only_web:
         print("Loading models locally...")
-        model = LaREDeepFakeV11(
+        model = LaFT(
             num_classes=2,
             clip_type="RN50x64",
             texture_model="convnext_tiny"
@@ -308,3 +308,4 @@ def test_consistency():
 
 if __name__ == "__main__":
     test_consistency()
+

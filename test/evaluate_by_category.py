@@ -21,7 +21,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 load_dotenv(PROJECT_ROOT / '.env')
 
 from service.dataset import ImageDataset
-from service.model_v11_fusion import LaREDeepFakeV11
+from service.model_v11_fusion import LaFT
 
 def evaluate_category_accuracy(model_path=None, test_file=''):
     # 1. Configuration
@@ -148,7 +148,7 @@ def evaluate_category_accuracy(model_path=None, test_file=''):
             print("-----------------------------------")
     
     # 4. Model Setup
-    model = LaREDeepFakeV11(num_classes=2, clip_type="RN50x64", texture_model="convnext_tiny")
+    model = LaFT(num_classes=2, clip_type="RN50x64", texture_model="convnext_tiny")
     
     if os.path.exists(ckpt_path):
         checkpoint = torch.load(ckpt_path, map_location='cpu')
@@ -374,11 +374,5 @@ def evaluate_category_accuracy(model_path=None, test_file=''):
 
     return results
 
-
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, help='Path to model checkpoint')
-    parser.add_argument('--test_file', type=str, default='', help='Path to test annotation file (overrides auto-discovery)')
-    args = parser.parse_args()
-    evaluate_category_accuracy(model_path=args.model, test_file=args.test_file)
+    evaluate_category_accuracy(model_path="outputs/v14_multiscale/best.pth", test_file="annotation/test_v2.txt")

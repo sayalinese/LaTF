@@ -15,6 +15,7 @@ from torch.utils.data import Dataset
 import albumentations as A
 
 MASK_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp')
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # ImageNet normalization (SegFormer 默认)
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -30,16 +31,49 @@ def _read_image(path):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
-def _find_mask(stem, mask_dirs):
-    """在 mask_dirs 列表中按 stem + 各种扩展名搜索 mask 文件。"""
+def _mask_stem_candidates(stem):
+    candidates = [stem]
+    if stem.endswith('_mask'):
+        base = stem[:-5]
+        if base:
+            candidates.append(base)
+    else:
+        candidates.append(f'{stem}_mask')
+    return candidates
+
+
+def _ordered_mask_dirs(image_path, mask_dirs):
+    """按图片来源优先排列 mask 目录，减少同 stem 误匹配。"""
+    norm = str(image_path).lower().replace('\\', '/')
+    preferred = []
     for d in mask_dirs:
-        for ext in MASK_EXTENSIONS:
-            p = d / f"{stem}{ext}"
-            if p.exists():
-                data = np.fromfile(str(p), dtype=np.uint8)
-                mask = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
-                if mask is not None:
-                    return mask
+        d_str = str(d).lower().replace('\\', '/')
+        if '/brgen_stuff_val/tp/' in norm and '/brgen_stuff_val/gt' in d_str:
+            preferred.append(d)
+        elif '/br-gen/forged/' in norm and '/stuff/coco/' in norm and '/mask/stuff/coco' in d_str:
+            preferred.append(d)
+        elif '/br-gen/forged/' in norm and '/stuff/imagenet/' in norm and '/mask/stuff/imagenet' in d_str:
+            preferred.append(d)
+        elif '/br-gen/forged/' in norm and '/stuff/places/' in norm and '/mask/stuff/places' in d_str:
+            preferred.append(d)
+
+    ordered = preferred + [d for d in mask_dirs if d not in preferred]
+    return ordered
+
+
+def _find_mask_for_image(image_path, mask_dirs):
+    """在 mask_dirs 列表中按 stem + 各种扩展名搜索 mask 文件。"""
+    stem = Path(image_path).stem
+    stem_candidates = _mask_stem_candidates(stem)
+    for d in _ordered_mask_dirs(image_path, mask_dirs):
+        for stem_name in stem_candidates:
+            for ext in MASK_EXTENSIONS:
+                p = d / f"{stem_name}{ext}"
+                if p.exists():
+                    data = np.fromfile(str(p), dtype=np.uint8)
+                    mask = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+                    if mask is not None:
+                        return mask
     return None
 
 
@@ -79,10 +113,13 @@ class SegFormerForgeryDataset(Dataset):
 
         # Mask 搜索目录
         if mask_dirs is None:
-            data_root = Path(self.samples[0][0]).parent
-            while data_root.name != 'data' and data_root != data_root.parent:
-                data_root = data_root.parent
+            data_root = PROJECT_ROOT / 'data'
             self.mask_dirs = [
+                data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'COCO',
+                data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'ImageNet',
+                data_root / '新数据' / 'BR-Gen' / 'Mask' / 'Stuff' / 'Places',
+                data_root / '新数据' / 'BRGen_Stuff_Val' / 'Gt',
+                # legacy fallback
                 data_root / 'change' / 'masks',
                 data_root / 'doubao' / 'masks',
             ]
@@ -120,6 +157,8 @@ class SegFormerForgeryDataset(Dataset):
             self.transform = A.Compose([
                 A.Resize(height=img_size, width=img_size),
             ])
+            
+        self._init_mask_map(mask_dirs, is_train)
 
     def _load_ssfr_map(self, map_file):
         """从 ann.txt 加载 stem → .pt 文件路径的映射。"""
@@ -136,51 +175,65 @@ class SegFormerForgeryDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _init_mask_map(self, mask_dirs, is_train):
+        # 预先扫描 mask 目录，构建从 stem 到绝对路径的内存字典
+        self.mask_map = {}
+        if is_train or True:  # always scan
+            print("Pre-scanning mask directories into memory to avoid IO bounds...")
+            for d in mask_dirs:
+                d_path = Path(d)
+                if not d_path.exists(): continue
+                for p in d_path.iterdir():
+                    if p.is_file() and p.suffix.lower() in MASK_EXTENSIONS:
+                        self.mask_map[p.stem.lower()] = str(p)
+
+    def _find_mask_fast(self, stem):
+        stem_lower = stem.lower()
+        if stem_lower in self.mask_map:
+            return self.mask_map[stem_lower]
+        if stem_lower.endswith('_mask'):
+            base = stem_lower[:-5]
+            if base in self.mask_map:
+                return self.mask_map[base]
+        else:
+            with_mask = stem_lower + '_mask'
+            if with_mask in self.mask_map:
+                return self.mask_map[with_mask]
+        return None
+
     def __getitem__(self, index):
         img_path, label = self.samples[index]
-
-        # 读取图片
         image = _read_image(img_path)
         if image is None:
             image = np.zeros((self.img_size, self.img_size, 3), dtype=np.uint8)
 
-        # 读取 mask
         if label == 1:
-            stem = Path(img_path).stem
-            raw_mask = _find_mask(stem, self.mask_dirs)
-            if raw_mask is not None:
-                mask = raw_mask
+            mask_path = self._find_mask_fast(Path(img_path).stem)
+            if mask_path is not None:
+                data = np.fromfile(mask_path, dtype=np.uint8)
+                mask = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
             else:
                 mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
         else:
             mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
 
-        # 确保 image 和 mask 尺寸一致 (来自不同源时分辨率可能不同)
-        h, w = image.shape[:2]
-        if mask.shape[0] != h or mask.shape[1] != w:
-            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        if self.load_ssfr:
+            ssfr_feat = self._load_ssfr(Path(img_path).stem)
+        else:
+            ssfr_feat = torch.zeros((7, self.img_size, self.img_size), dtype=torch.float32)
 
-        # 数据增强 (图片和 mask 同步变换)
-        transformed = self.transform(image=image, mask=mask)
-        image = transformed['image']
-        mask = transformed['mask']
+        if self.transform:
+            augmented = self.transform(image=image, mask=mask)
+            image = augmented['image']
+            mask = augmented['mask']
 
-        # 归一化图片 → float32 [C, H, W]
-        image = image.astype(np.float32) / 255.0
-        image = (image - IMAGENET_MEAN) / IMAGENET_STD
-        image = torch.from_numpy(image.transpose(2, 0, 1))  # [3, H, W]
+        # numpy -> tensor
+        image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+        mask = torch.from_numpy(mask).float() / 255.0
 
-        # Mask → long [H, W], 二值 (0=背景, 1=篡改)
-        mask = (mask > 127).astype(np.int64)
-        mask = torch.from_numpy(mask)  # [H, W]
-
-        # SSFR 拼接 (可选)
-        if self.use_ssfr:
-            stem = Path(img_path).stem
-            ssfr = self._load_ssfr(stem)  # [7, H, W]
-            image = torch.cat([image, ssfr], dim=0)  # [10, H, W]
-
-        return image, mask
+        return image, mask, label, ssfr_feat, str(img_path)
 
     def _load_ssfr(self, stem):
         """加载 SSFR 特征并上采样到 img_size。"""

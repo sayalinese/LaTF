@@ -39,6 +39,10 @@ interface DetectedMessage {
         class_idx: number;
         probabilities: Record<string, number>;
         heatmap?: string | null;
+        lare_heatmap?: string | null;
+        localization_heatmap?: string | null;
+        localization_score?: number | null;
+        localization_area_ratio?: number | null;
         cascade_info?: {
             global_prob: number;
             local_prob: number | null;
@@ -140,14 +144,41 @@ const currentImageUrl = computed(() => {
 // 获取当前选中的LaRE热力图
 const currentLareHeatmap = computed(() => {
     const detection = currentDetection.value;
-    if (detection?.detectData?.heatmap) {
-        return detection.detectData.heatmap;
+    if (detection?.detectData?.lare_heatmap) {
+        return detection.detectData.lare_heatmap;
     }
-    return props.lareHeatmap || props.currentDetectResult?.heatmap || null;
+    if (detection?.detectData?.heatmap) {
+        if (!detection.detectData.localization_heatmap) {
+            return detection.detectData.heatmap;
+        }
+    }
+    if (detection?.lare_heatmap) {
+        return detection.lare_heatmap;
+    }
+    if (props.currentDetectResult?.lare_heatmap) {
+        return props.currentDetectResult.lare_heatmap;
+    }
+    if (props.currentDetectResult?.heatmap && !props.currentDetectResult?.localization_heatmap) {
+        return props.currentDetectResult.heatmap;
+    }
+    return props.lareHeatmap || null;
 });
 
 // 获取当前选中的定位热力图
 const currentLocalizationHeatmap = computed(() => {
+    const detection = currentDetection.value;
+    if (detection?.detectData?.localization_heatmap) {
+        return detection.detectData.localization_heatmap;
+    }
+    if (detection?.localization_heatmap) {
+        return detection.localization_heatmap;
+    }
+    if (props.currentDetectResult?.localization_heatmap) {
+        return props.currentDetectResult.localization_heatmap;
+    }
+    if (detection?.detectData?.heatmap && !detection?.detectData?.lare_heatmap) {
+        return detection.detectData.heatmap;
+    }
     return props.localizationHeatmap || null;
 });
 
@@ -201,7 +232,7 @@ const realPercent = computed(() => {
         probs = props.detectionResult.probabilities;
     }
     if (probs) {
-        const realKey = Object.keys(probs).find(k => k.toLowerCase().includes('real')) || 'Real Photo';
+        const realKey = Object.keys(probs).find(k => k.toLowerCase().includes('real')) || 'Real';
         return ((probs[realKey] || 0) * 100).toFixed(2);
     }
     return '0.00';
@@ -286,16 +317,36 @@ const matchedRules = computed(() => {
 const localizationAnalysis = computed(() => {
     const detection = currentDetection.value;
     let cascadeInfo = null;
+    let localizationScore = null;
+    let localizationAreaRatio = null;
     
     if (detection?.detectData?.cascade_info) {
         cascadeInfo = detection.detectData.cascade_info;
     }
+
+    if (detection?.detectData?.localization_score !== undefined) {
+        localizationScore = detection.detectData.localization_score;
+    } else if (detection?.localization_score !== undefined) {
+        localizationScore = detection.localization_score;
+    } else if (props.currentDetectResult?.localization_score !== undefined) {
+        localizationScore = props.currentDetectResult.localization_score;
+    }
+
+    if (detection?.detectData?.localization_area_ratio !== undefined) {
+        localizationAreaRatio = detection.detectData.localization_area_ratio;
+    } else if (detection?.localization_area_ratio !== undefined) {
+        localizationAreaRatio = detection.localization_area_ratio;
+    } else if (props.currentDetectResult?.localization_area_ratio !== undefined) {
+        localizationAreaRatio = props.currentDetectResult.localization_area_ratio;
+    }
     
     if (!cascadeInfo?.crop_bbox) {
         return {
-            region: '未检测到明显篡改区域',
-            type: '未检出篡改',
-            confidence: 0
+            region: localizationAreaRatio != null
+                ? `疑似区域占比 ${(localizationAreaRatio * 100).toFixed(2)}%`
+                : '未检测到明显篡改区域',
+            type: currentLocalizationHeatmap.value ? '独立定位模型输出' : '未检出篡改',
+            confidence: localizationScore ?? 0
         };
     }
     
@@ -363,9 +414,9 @@ const detectionStats = computed(() => {
 
 // 模型版本信息
 const modelInfo = computed(() => ({
-    latf: 'LaTF v13',
-    lare: 'SDXL',
-    localization: 'V14 FLH',
+    latf: 'laft',
+    lare: 'SSFR 7ch',
+    localization: 'SegFormer-B2',
     clip: 'RN50x64'
 }));
 </script>
